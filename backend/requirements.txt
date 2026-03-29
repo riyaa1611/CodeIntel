@@ -1,0 +1,15 @@
+fastapi==0.135.1
+uvicorn[standard]==0.42.0
+celery==5.6.2
+redis==7.3.0
+sqlalchemy==2.0.48
+asyncpg==0.31.0
+alembic==1.18.4
+PyGithub==2.9.0
+httpx==0.28.1
+python-dotenv==1.2.2
+pydantic==2.12.5
+pydantic-settings==2.13.1
+python-multipart==0.0.22
+PyJWT==2.12.1
+cryptography==46.0.5
