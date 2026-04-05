@@ -3,9 +3,9 @@ import logging
 from fastapi import Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from app.config import settings
 from app.database import get_db
 from app.models import User
+from app.utils.cache import get_redis_connection
 
 logger = logging.getLogger(__name__)
 
@@ -16,11 +16,11 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
     if not session_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    import redis.asyncio as aioredis
-    redis = aioredis.from_url(settings.redis_url)
-    raw = await redis.get(f"session:{session_id}")
-    await redis.aclose()
+    redis = get_redis_connection()
+    if redis is None:
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
 
+    raw = await redis.get(f"session:{session_id}")
     if not raw:
         raise HTTPException(status_code=401, detail="Session expired")
 

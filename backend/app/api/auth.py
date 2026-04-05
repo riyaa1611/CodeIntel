@@ -2,16 +2,20 @@ import asyncio
 import json
 import logging
 import secrets
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import RedirectResponse
-from sqlalchemy import func, select
+from pydantic import BaseModel
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
+from app.dependencies import get_current_user
 from app.models import User
+from app.utils.cache import get_redis_connection
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -19,9 +23,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 SESSION_TTL = 60 * 60 * 24 * 7  # 7 days
 
 
-async def _get_redis():
-    import redis.asyncio as aioredis
-    return aioredis.from_url(settings.redis_url)
+class PreferencesUpdate(BaseModel):
+    email_preferences: dict[Literal["review_alerts", "monthly_digest"], bool]
 
 
 @router.get("/login")
@@ -35,7 +38,7 @@ async def login():
 
 
 @router.get("/callback")
-async def callback(code: str, response: Response, db: AsyncSession = Depends(get_db)):
+async def callback(code: str, db: AsyncSession = Depends(get_db)):
     """Exchange OAuth code for GitHub token, upsert user, set session cookie."""
     async with httpx.AsyncClient() as client:
         token_resp = await client.post(
@@ -71,7 +74,10 @@ async def callback(code: str, response: Response, db: AsyncSession = Depends(get
         None,
     )
 
-    # First user ever becomes admin
+    # Advisory lock prevents race condition when two users register simultaneously.
+    # Lock is scoped to the transaction and released on commit/rollback.
+    await db.execute(text("SELECT pg_advisory_xact_lock(1234567890)"))
+
     total_users = await db.scalar(select(func.count()).select_from(User))
     is_first_user = (total_users == 0)
 
@@ -97,10 +103,10 @@ async def callback(code: str, response: Response, db: AsyncSession = Depends(get
     await db.refresh(user)
 
     session_id = secrets.token_urlsafe(32)
-    session_data = json.dumps({"user_id": user.id, "role": user.role})
-    redis = await _get_redis()
-    await redis.setex(f"session:{session_id}", SESSION_TTL, session_data)
-    await redis.aclose()
+    session_data = json.dumps({"user_id": user.id})
+    redis = get_redis_connection()
+    if redis:
+        await redis.setex(f"session:{session_id}", SESSION_TTL, session_data)
 
     redirect = RedirectResponse(url="/")
     redirect.set_cookie(
@@ -108,6 +114,7 @@ async def callback(code: str, response: Response, db: AsyncSession = Depends(get
         value=session_id,
         httponly=True,
         samesite="lax",
+        path="/",
         max_age=SESSION_TTL,
         secure=settings.app_env == "production",
     )
@@ -115,25 +122,8 @@ async def callback(code: str, response: Response, db: AsyncSession = Depends(get
 
 
 @router.get("/me")
-async def get_me(request: Request, db: AsyncSession = Depends(get_db)):
+async def get_me(user: User = Depends(get_current_user)):
     """Return current authenticated user or 401."""
-    session_id = request.cookies.get("session_id")
-    if not session_id:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-
-    redis = await _get_redis()
-    raw = await redis.get(f"session:{session_id}")
-    await redis.aclose()
-
-    if not raw:
-        raise HTTPException(status_code=401, detail="Session expired")
-
-    data = json.loads(raw)
-    result = await db.execute(select(User).where(User.id == data["user_id"]))
-    user = result.scalar_one_or_none()
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
-
     return {
         "id": user.id,
         "username": user.username,
@@ -149,21 +139,22 @@ async def logout(request: Request):
     """Delete session from Redis and clear cookie."""
     session_id = request.cookies.get("session_id")
     if session_id:
-        redis = await _get_redis()
-        await redis.delete(f"session:{session_id}")
-        await redis.aclose()
+        redis = get_redis_connection()
+        if redis:
+            await redis.delete(f"session:{session_id}")
 
     resp = Response(content='{"status": "logged out"}', media_type="application/json")
-    resp.delete_cookie("session_id")
+    resp.delete_cookie("session_id", httponly=True, samesite="lax", path="/")
     return resp
 
 
 @router.patch("/preferences")
-async def update_preferences(body: dict, request: Request, db: AsyncSession = Depends(get_db)):
+async def update_preferences(
+    body: PreferencesUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Update email notification preferences for current user."""
-    from app.dependencies import get_current_user
-    user = await get_current_user(request, db)
-    prefs = body.get("email_preferences", {})
-    user.email_preferences = {**user.email_preferences, **prefs}
+    user.email_preferences = {**user.email_preferences, **body.email_preferences}
     await db.commit()
     return {"status": "updated"}
