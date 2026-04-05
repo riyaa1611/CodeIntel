@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     github_webhook_secret: str = Field(default="", env="GITHUB_WEBHOOK_SECRET")
     github_client_id: str = Field(default="", env="GITHUB_CLIENT_ID")
     github_client_secret: str = Field(default="", env="GITHUB_CLIENT_SECRET")
+    # GitHub Personal Access Token (used for public repo analytics and deep scan)
+    github_token: str = Field(default="", env="GITHUB_TOKEN")
 
     # Database
     database_url: str = Field(
@@ -25,6 +27,17 @@ class Settings(BaseSettings):
     openrouter_model: str = Field(
         default="deepseek/deepseek-r1", env="OPENROUTER_MODEL"
     )
+
+    # Anthropic (Claude Sonnet 4.5 - replaces OpenRouter for LLM calls)
+    anthropic_api_key: str = Field(default="", env="ANTHROPIC_API_KEY")
+    anthropic_model: str = Field(default="claude-sonnet-4-5", env="ANTHROPIC_MODEL")
+
+    # Auth sessions
+    session_secret: str = Field(default="change-me-in-production", env="SESSION_SECRET")
+
+    # Email (Resend)
+    resend_api_key: str = Field(default="", env="RESEND_API_KEY")
+    email_from: str = Field(default="codeintel@yourdomain.com", env="EMAIL_FROM")
 
     # Slack
     slack_webhook_url: str = Field(default="", env="SLACK_WEBHOOK_URL")
