@@ -1,7 +1,8 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc
+from app.config import settings
 from app.database import get_db
 from app.models import TaskFailure
 
@@ -9,8 +10,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
 
+def verify_admin_token(x_admin_token: str = Header(default="")):
+    """Basic static-token guard. Will be replaced by GitHub OAuth in Phase 3."""
+    if settings.app_env != "development" and x_admin_token != settings.session_secret:
+        raise HTTPException(status_code=403, detail="Invalid admin token")
+
+
 @router.get("/failures")
-async def list_failures(db: AsyncSession = Depends(get_db)):
+async def list_failures(
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_admin_token),
+):
     """List the 100 most recent failed Celery tasks."""
     result = await db.execute(
         select(TaskFailure).order_by(desc(TaskFailure.failed_at)).limit(100)
@@ -31,7 +41,11 @@ async def list_failures(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/failures/{failure_id}/retry")
-async def retry_failure(failure_id: int, db: AsyncSession = Depends(get_db)):
+async def retry_failure(
+    failure_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_admin_token),
+):
     """Re-enqueue a failed task with its original arguments."""
     result = await db.execute(select(TaskFailure).where(TaskFailure.id == failure_id))
     failure = result.scalar_one_or_none()

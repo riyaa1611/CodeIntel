@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 from celery import Task
+from celery.exceptions import Retry as _CeleryRetry
 
 from app.config import settings
 
@@ -173,8 +174,7 @@ async def _fetch_file_content(owner: str, repo: str, path: str) -> str | None:
 
 def _run_deep_scan_llm_sync(owner: str, repo: str, file_contents: dict[str, Any]) -> dict[str, Any]:
     """Synchronous Anthropic call for deep scan (runs in executor)."""
-    import anthropic as _anthropic
-    client = _anthropic.Anthropic(api_key=settings.anthropic_api_key)
+    from app.services.ai_service import _client as _anthropic_client
 
     sections = []
     for path, content in file_contents.items():
@@ -189,7 +189,7 @@ def _run_deep_scan_llm_sync(owner: str, repo: str, file_contents: dict[str, Any]
 
     for attempt in range(1, 4):
         try:
-            response = client.messages.create(
+            response = _anthropic_client.messages.create(
                 model=settings.anthropic_model,
                 max_tokens=4096,
                 messages=[{"role": "user", "content": prompt}],
@@ -462,6 +462,9 @@ from celery.signals import task_failure as _celery_task_failure
 def on_task_failure(sender=None, task_id=None, exception=None,
                     args=None, kwargs=None, traceback=None, einfo=None, **rest):
     """Write failed Celery tasks to task_failures table after max retries exhausted."""
+    # Skip intermediate retries — only record genuine final failures
+    if isinstance(exception, _CeleryRetry):
+        return
     task_name = getattr(sender, "name", str(sender))
     error_msg = str(exception) if exception else "Unknown error"
     tb_text = "".join(_tb_module.format_tb(traceback)) if traceback else None

@@ -51,29 +51,36 @@ async def cache_set(key: str, value: str, ttl: int = 300) -> bool:
         return False
 
 
-async def cache_delete(key: str) -> None:
-    """Delete a single cache key."""
+async def cache_delete(key: str) -> bool:
+    """Delete a single cache key. Returns False silently if Redis unavailable."""
     try:
-        import redis.asyncio as aioredis
-        redis = aioredis.from_url(settings.redis_url)
+        redis = get_redis_connection()
+        if redis is None:
+            return False
         await redis.delete(key)
-        await redis.aclose()
-    except Exception:
-        pass
+        return True
+    except Exception as e:
+        logger.warning("Cache DELETE failed for key %s: %s", key, e)
+        return False
 
 
-async def cache_delete_pattern(pattern: str) -> None:
-    """Delete all cache keys matching a glob pattern using SCAN (not KEYS)."""
+async def cache_delete_pattern(pattern: str) -> int:
+    """Delete all cache keys matching a glob pattern using SCAN (not KEYS).
+    Returns the number of keys deleted, or -1 if Redis unavailable."""
     try:
-        import redis.asyncio as aioredis
-        redis = aioredis.from_url(settings.redis_url)
+        redis = get_redis_connection()
+        if redis is None:
+            return -1
+        deleted = 0
         cursor = 0
         while True:
             cursor, keys = await redis.scan(cursor, match=pattern, count=100)
             if keys:
                 await redis.delete(*keys)
+                deleted += len(keys)
             if cursor == 0:
                 break
-        await redis.aclose()
-    except Exception:
-        pass
+        return deleted
+    except Exception as e:
+        logger.warning("Cache DELETE PATTERN failed for pattern %s: %s", pattern, e)
+        return -1

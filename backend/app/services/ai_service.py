@@ -99,7 +99,7 @@ async def call_llm_with_retry(prompt: str) -> AIReviewOutput:
                 "Calling Anthropic (model=%s, attempt=%d/%d)",
                 settings.anthropic_model, attempt, MAX_RETRIES,
             )
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             raw = await loop.run_in_executor(None, _call_anthropic_sync, prompt)
 
             if raw.startswith("```"):
