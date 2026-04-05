@@ -58,9 +58,10 @@ async def test_malformed_json_retries_and_raises():
     with patch(
         "app.services.ai_service._call_anthropic_sync",
         return_value="not valid json at all !!!",
-    ):
+    ) as mock_llm:
         with pytest.raises(RuntimeError, match="AI review failed after"):
             await call_llm_with_retry("test prompt")
+    assert mock_llm.call_count == 3  # must exhaust all MAX_RETRIES attempts
 
 
 async def test_markdown_fence_stripped():

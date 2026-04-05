@@ -48,12 +48,18 @@ async def engine():
 
 @pytest.fixture
 async def db(engine):
-    session_factory = async_sessionmaker(
-        engine, class_=AsyncSession, expire_on_commit=False
-    )
-    async with session_factory() as session:
+    """Per-test DB fixture with true transaction isolation.
+
+    Wraps each test in a transaction that is always rolled back at teardown,
+    even if the test calls session.commit(). This prevents unique-constraint
+    failures on repeated test runs and keeps tests fully isolated.
+    """
+    async with engine.connect() as conn:
+        await conn.begin()
+        session = AsyncSession(bind=conn, expire_on_commit=False)
         yield session
-        await session.rollback()
+        await session.close()
+        await conn.rollback()
 
 
 @pytest.fixture
