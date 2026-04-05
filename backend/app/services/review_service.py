@@ -306,6 +306,12 @@ async def run_pr_review(
         )
 
     await session.commit()
+
+    from app.utils.cache import cache_delete, cache_delete_pattern
+    await cache_delete(f"codeintel:{repo.id}:stats")
+    await cache_delete(f"codeintel:{repo.id}:leaderboard")
+    await cache_delete_pattern(f"codeintel:{repo.id}:reviews:*")
+
     logger.info(
         "Review pipeline complete for %s#%d (overall=%.1f)",
         repo_full_name,

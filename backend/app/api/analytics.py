@@ -1,3 +1,5 @@
+import hashlib
+import json as _json
 import logging
 import math
 from datetime import datetime, timedelta, timezone
@@ -7,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.utils.cache import cache_get, cache_set
 from app.models import PRReview, Repository
 from app.schemas import (
     BenchmarkResult,
@@ -110,6 +113,14 @@ async def list_reviews(
     db: AsyncSession = Depends(get_db),
 ):
     """Paginated list of PR reviews for a repository."""
+    params_hash = hashlib.md5(
+        _json.dumps({"page": page, "limit": limit, "min_score": min_score, "max_score": max_score}).encode()
+    ).hexdigest()[:8]
+    cache_key = f"codeintel:{repo_id}:reviews:{params_hash}"
+    cached = await cache_get(cache_key)
+    if cached:
+        return _json.loads(cached)
+
     # Verify repo exists
     repo_result = await db.execute(select(Repository).where(Repository.id == repo_id))
     if not repo_result.scalar_one_or_none():
@@ -134,13 +145,15 @@ async def list_reviews(
     result = await db.execute(query)
     reviews = result.scalars().all()
 
-    return PaginatedPRReviews(
+    result_data = PaginatedPRReviews(
         items=[PRReviewListItem.model_validate(r) for r in reviews],
         total=total,
         page=page,
         limit=limit,
         pages=math.ceil(total / limit) if total > 0 else 1,
     )
+    await cache_set(cache_key, _json.dumps(result_data.model_dump(), default=str), ttl=30)
+    return result_data
 
 
 @router.get("/repos/{repo_id}/reviews/{review_id}", response_model=PRReviewResponse)
@@ -164,6 +177,11 @@ async def get_review(
 @router.get("/repos/{repo_id}/stats", response_model=RepoStats)
 async def get_repo_stats(repo_id: int, db: AsyncSession = Depends(get_db)):
     """Aggregate statistics for a repository."""
+    cache_key = f"codeintel:{repo_id}:stats"
+    cached = await cache_get(cache_key)
+    if cached:
+        return _json.loads(cached)
+
     repo_result = await db.execute(select(Repository).where(Repository.id == repo_id))
     if not repo_result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Repository not found")
@@ -175,7 +193,7 @@ async def get_repo_stats(repo_id: int, db: AsyncSession = Depends(get_db)):
     total = total_result.scalar() or 0
 
     if total == 0:
-        return RepoStats(
+        result_data = RepoStats(
             total_reviews=0,
             dimension_averages=DimensionAverages(
                 avg_overall=0,
@@ -187,6 +205,8 @@ async def get_repo_stats(repo_id: int, db: AsyncSession = Depends(get_db)):
             score_distribution=ScoreDistribution(low=0, medium=0, high=0),
             trend_data=[],
         )
+        await cache_set(cache_key, _json.dumps(result_data.model_dump(), default=str), ttl=60)
+        return result_data
 
     # Dimension averages
     avg_result = await db.execute(
@@ -242,7 +262,7 @@ async def get_repo_stats(repo_id: int, db: AsyncSession = Depends(get_db)):
         for row in trend_rows
     ]
 
-    return RepoStats(
+    result_data = RepoStats(
         total_reviews=total,
         dimension_averages=DimensionAverages(
             avg_overall=round(float(avgs.avg_overall or 0), 1),
@@ -258,11 +278,18 @@ async def get_repo_stats(repo_id: int, db: AsyncSession = Depends(get_db)):
         ),
         trend_data=trend_data,
     )
+    await cache_set(cache_key, _json.dumps(result_data.model_dump(), default=str), ttl=60)
+    return result_data
 
 
 @router.get("/repos/{repo_id}/leaderboard", response_model=list[LeaderboardEntry])
 async def get_leaderboard(repo_id: int, db: AsyncSession = Depends(get_db)):
     """Per-author leaderboard ranked by average overall score."""
+    cache_key = f"codeintel:{repo_id}:leaderboard"
+    cached = await cache_get(cache_key)
+    if cached:
+        return _json.loads(cached)
+
     repo_result = await db.execute(select(Repository).where(Repository.id == repo_id))
     if not repo_result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="Repository not found")
@@ -283,7 +310,7 @@ async def get_leaderboard(repo_id: int, db: AsyncSession = Depends(get_db)):
     )
     rows = result.all()
 
-    return [
+    result_data = [
         LeaderboardEntry(
             rank=idx + 1,
             author=row.author,
@@ -296,6 +323,12 @@ async def get_leaderboard(repo_id: int, db: AsyncSession = Depends(get_db)):
         )
         for idx, row in enumerate(rows)
     ]
+    await cache_set(
+        cache_key,
+        _json.dumps([e.model_dump() for e in result_data], default=str),
+        ttl=300,
+    )
+    return result_data
 
 
 @router.get("/repos/{repo_id}/benchmark/{score}", response_model=BenchmarkResult)
