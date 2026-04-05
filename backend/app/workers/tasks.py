@@ -452,3 +452,47 @@ def deep_scan_repository(self: Task, owner: str, repo: str, repo_id: int) -> dic
         except self.MaxRetriesExceededError:
             logger.error("Max retries exceeded for deep scan %s/%s — giving up", owner, repo)
             return {"error": str(exc), "owner": owner, "repo": repo}
+
+
+import traceback as _tb_module
+from celery.signals import task_failure as _celery_task_failure
+
+
+@_celery_task_failure.connect
+def on_task_failure(sender=None, task_id=None, exception=None,
+                    args=None, kwargs=None, traceback=None, einfo=None, **rest):
+    """Write failed Celery tasks to task_failures table after max retries exhausted."""
+    task_name = getattr(sender, "name", str(sender))
+    error_msg = str(exception) if exception else "Unknown error"
+    tb_text = "".join(_tb_module.format_tb(traceback)) if traceback else None
+
+    task_args_data: dict = {}
+    if args:
+        task_args_data["args"] = list(args)
+    if kwargs:
+        task_args_data["kwargs"] = kwargs
+
+    async def _write():
+        from app.database import AsyncSessionLocal
+        from app.models import TaskFailure
+
+        async with AsyncSessionLocal() as session:
+            failure = TaskFailure(
+                task_name=task_name,
+                task_args=task_args_data,
+                error_message=error_msg,
+                traceback_text=tb_text,
+            )
+            session.add(failure)
+            await session.commit()
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_write())
+        finally:
+            loop.close()
+        logger.info("TaskFailure recorded for task: %s", task_name)
+    except Exception as exc:
+        logger.error("Failed to record TaskFailure: %s", exc)
