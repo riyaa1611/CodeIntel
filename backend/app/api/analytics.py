@@ -9,8 +9,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.dependencies import get_current_user, require_admin
+from app.models import PRReview, Repository, User
 from app.utils.cache import cache_get, cache_set
-from app.models import PRReview, Repository
 from app.schemas import (
     BenchmarkResult,
     DimensionAverages,
@@ -34,7 +35,10 @@ router = APIRouter(prefix="/api", tags=["analytics"])
 # ── Repository Endpoints ──────────────────────────────────────────────────────
 
 @router.get("/repos", response_model=list[RepositoryResponse])
-async def list_repos(db: AsyncSession = Depends(get_db)):
+async def list_repos(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """List all connected repositories."""
     result = await db.execute(select(Repository).order_by(Repository.created_at.desc()))
     repos = result.scalars().all()
@@ -46,7 +50,11 @@ async def list_repos(db: AsyncSession = Depends(get_db)):
     response_model=RepositoryResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def create_repo(body: RepositoryCreate, db: AsyncSession = Depends(get_db)):
+async def create_repo(
+    body: RepositoryCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
     """Register a new repository for CodeIntel reviews."""
     full_name = body.github_repo_full_name.strip()
 
@@ -89,6 +97,7 @@ async def update_slack_webhook(
     repo_id: int,
     body: SlackWebhookUpdate,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Update Slack webhook URL for a repository."""
     result = await db.execute(select(Repository).where(Repository.id == repo_id))
@@ -111,6 +120,7 @@ async def list_reviews(
     min_score: float | None = Query(default=None, ge=0, le=100),
     max_score: float | None = Query(default=None, ge=0, le=100),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Paginated list of PR reviews for a repository."""
     params_hash = hashlib.md5(
@@ -158,7 +168,10 @@ async def list_reviews(
 
 @router.get("/repos/{repo_id}/reviews/{review_id}", response_model=PRReviewResponse)
 async def get_review(
-    repo_id: int, review_id: int, db: AsyncSession = Depends(get_db)
+    repo_id: int,
+    review_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Get a single PR review by ID."""
     result = await db.execute(
@@ -175,7 +188,11 @@ async def get_review(
 # ── Stats / Analytics Endpoints ───────────────────────────────────────────────
 
 @router.get("/repos/{repo_id}/stats", response_model=RepoStats)
-async def get_repo_stats(repo_id: int, db: AsyncSession = Depends(get_db)):
+async def get_repo_stats(
+    repo_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Aggregate statistics for a repository."""
     cache_key = f"codeintel:{repo_id}:stats"
     cached = await cache_get(cache_key)
@@ -283,7 +300,11 @@ async def get_repo_stats(repo_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/repos/{repo_id}/leaderboard", response_model=list[LeaderboardEntry])
-async def get_leaderboard(repo_id: int, db: AsyncSession = Depends(get_db)):
+async def get_leaderboard(
+    repo_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Per-author leaderboard ranked by average overall score."""
     cache_key = f"codeintel:{repo_id}:leaderboard"
     cached = await cache_get(cache_key)
@@ -333,7 +354,10 @@ async def get_leaderboard(repo_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.get("/repos/{repo_id}/benchmark/{score}", response_model=BenchmarkResult)
 async def get_benchmark(
-    repo_id: int, score: float, db: AsyncSession = Depends(get_db)
+    repo_id: int,
+    score: float,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Return what percentile a given score is in this repository."""
     repo_result = await db.execute(select(Repository).where(Repository.id == repo_id))

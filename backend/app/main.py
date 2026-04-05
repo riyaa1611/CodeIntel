@@ -60,11 +60,13 @@ app.add_middleware(
 # ── Routers ───────────────────────────────────────────────────────────────────
 from app.api.admin import router as admin_router
 from app.api.analytics import router as analytics_router
+from app.api.auth import router as auth_router
 from app.api.deep_scan import router as deep_scan_router
 from app.api.preview import router as preview_router
 from app.api.public import router as public_router
 from app.api.webhooks import router as webhooks_router
 
+app.include_router(auth_router)
 app.include_router(webhooks_router)
 app.include_router(analytics_router)
 app.include_router(public_router)

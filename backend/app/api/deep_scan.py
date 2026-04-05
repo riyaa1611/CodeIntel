@@ -12,8 +12,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.dependencies import get_current_user
 from app.middleware.rate_limit import limiter
-from app.models import DeepScanResult, Repository
+from app.models import DeepScanResult, Repository, User
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,7 @@ async def trigger_deep_scan(
     request: Request,
     repo_id: int,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """
     Enqueues an AI-powered deep scan of the full repository codebase.
@@ -118,6 +120,7 @@ async def trigger_deep_scan(
 async def get_latest_deep_scan(
     repo_id: int,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Returns the most recent DeepScanResult for the given repository, or 404 if none exists."""
     await _get_repo_or_404(repo_id, db)
@@ -165,6 +168,7 @@ async def get_latest_deep_scan(
 async def get_deep_scan_history(
     repo_id: int,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
     """Returns all deep scan results for the given repository, ordered newest first."""
     await _get_repo_or_404(repo_id, db)
