@@ -133,3 +133,22 @@ class TaskFailure(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    github_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
+    username: Mapped[str] = mapped_column(String(128), nullable=False)
+    avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    email: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    role: Mapped[str] = mapped_column(String(32), nullable=False, server_default="member")
+    email_preferences: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        nullable=False,
+        server_default='{"review_alerts": true, "monthly_digest": true}',
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
