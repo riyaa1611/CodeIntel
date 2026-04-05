@@ -5,10 +5,15 @@ import Dashboard from '../components/Dashboard'
 import PRTable from '../components/PRTable'
 import Leaderboard from '../components/Leaderboard'
 import SlackSetup from '../components/SlackSetup'
+import PublicRepoSearch from '../components/PublicRepoSearch'
+import DeepScanPanel from '../components/DeepScanPanel'
+import RepositoryPreview from '../components/RepositoryPreview'
+import { useAuth } from '@/contexts/AuthContext'
 
-type Tab = 'overview' | 'reviews' | 'leaderboard' | 'settings'
+type Tab = 'overview' | 'reviews' | 'leaderboard' | 'settings' | 'deep_scan'
 
 export default function Home() {
+  const { user, logout } = useAuth()
   const [repos, setRepos] = useState<Repository[]>([])
   const [selectedRepo, setSelectedRepo] = useState<Repository | null>(null)
   const [reposLoading, setReposLoading] = useState(true)
@@ -62,6 +67,7 @@ export default function Home() {
     { id: 'overview', label: 'Overview' },
     { id: 'reviews', label: 'PR Reviews' },
     { id: 'leaderboard', label: 'Leaderboard' },
+    { id: 'deep_scan', label: 'Deep Scan' },
     { id: 'settings', label: 'Settings' },
   ]
 
@@ -115,6 +121,18 @@ export default function Home() {
               >
                 {showAddRepo ? 'Cancel' : '+ Add Repo'}
               </button>
+
+              <div className="flex items-center gap-3">
+                {user?.avatar_url && (
+                  <img src={user.avatar_url} alt={user.username}
+                    className="w-8 h-8 rounded-full border border-gray-200" />
+                )}
+                <span className="text-sm text-gray-600">{user?.username}</span>
+                <button onClick={logout}
+                  className="text-sm text-red-500 hover:text-red-700 transition">
+                  Logout
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -167,8 +185,11 @@ export default function Home() {
 
       {/* Main content */}
       <main className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6">
+        {/* Public Repo Search — always visible above connected repos */}
+        <PublicRepoSearch />
+
         {!selectedRepo ? (
-          <div className="flex flex-col items-center justify-center py-24 text-center">
+          <div className="flex flex-col items-center justify-center py-16 text-center">
             <div className="text-5xl mb-4">🤖</div>
             <h2 className="text-xl font-semibold text-gray-700">
               Welcome to CodeIntel
@@ -212,7 +233,10 @@ export default function Home() {
 
             {/* Tab content */}
             {activeTab === 'overview' && (
-              <Dashboard repoId={selectedRepo.id} />
+              <div className="space-y-6">
+                <Dashboard repoId={selectedRepo.id} />
+                <RepositoryPreview repoId={selectedRepo.id} />
+              </div>
             )}
 
             {activeTab === 'reviews' && (
@@ -230,6 +254,12 @@ export default function Home() {
                   Author Leaderboard
                 </h2>
                 <Leaderboard repoId={selectedRepo.id} />
+              </div>
+            )}
+
+            {activeTab === 'deep_scan' && (
+              <div className="card">
+                <DeepScanPanel repoId={selectedRepo.id} />
               </div>
             )}
 

@@ -1,11 +1,16 @@
 import axios from 'axios'
 import type {
   BenchmarkResult,
+  DeepScanHistoryItem,
+  DeepScanResult,
+  DeepScanTriggerResponse,
   LeaderboardEntry,
   PaginatedPRReviews,
   PRReview,
+  PublicRepoData,
   Repository,
   RepositoryCreate,
+  RepositoryPreview,
   RepoStats,
 } from '../types'
 
@@ -13,7 +18,10 @@ const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000',
   timeout: 30_000,
   headers: { 'Content-Type': 'application/json' },
+  withCredentials: true,
 })
+
+export const apiClient = api
 
 // ── Repositories ──────────────────────────────────────────────────────────────
 
@@ -90,3 +98,52 @@ export async function getBenchmark(
   )
   return data
 }
+
+// ── Public Repo Analytics (Feature 1) ────────────────────────────────────────
+
+export async function getPublicRepo(owner: string, repo: string): Promise<PublicRepoData> {
+  const { data } = await api.get<PublicRepoData>(`/api/public/repo/${owner}/${repo}`)
+  return data
+}
+
+// ── Deep Scan (Feature 2) ─────────────────────────────────────────────────────
+
+export async function triggerDeepScan(repoId: number): Promise<DeepScanTriggerResponse> {
+  const { data } = await api.post<DeepScanTriggerResponse>(
+    `/api/repos/${repoId}/deep-scan`
+  )
+  return data
+}
+
+export async function getLatestDeepScan(repoId: number): Promise<DeepScanResult> {
+  const { data } = await api.get<DeepScanResult>(
+    `/api/repos/${repoId}/deep-scan/latest`
+  )
+  return data
+}
+
+export async function getDeepScanHistory(repoId: number): Promise<DeepScanHistoryItem[]> {
+  const { data } = await api.get<DeepScanHistoryItem[]>(
+    `/api/repos/${repoId}/deep-scan/history`
+  )
+  return data
+}
+
+// ── Repository Preview (Feature 3) ───────────────────────────────────────────
+
+export async function getRepoPreview(repoId: number): Promise<RepositoryPreview> {
+  const { data } = await api.get<RepositoryPreview>(`/api/repos/${repoId}/preview`)
+  return data
+}
+
+// ── Auth interceptor ──────────────────────────────────────────────────────────
+
+apiClient.interceptors.response.use(
+  response => response,
+  error => {
+    if (error.response?.status === 401 && !window.location.pathname.startsWith('/login')) {
+      window.location.href = '/login'
+    }
+    return Promise.reject(error)
+  }
+)
