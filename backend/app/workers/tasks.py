@@ -212,7 +212,7 @@ def _run_deep_scan_llm_sync(owner: str, repo: str, file_contents: dict[str, Any]
 
 async def _run_deep_scan_llm(owner: str, repo: str, file_contents: dict[str, Any]) -> dict[str, Any]:
     import asyncio
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, _run_deep_scan_llm_sync, owner, repo, file_contents)
 
 
