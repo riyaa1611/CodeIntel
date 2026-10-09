@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ── Repository Schemas ──────────────────────────────────────────────────────
@@ -132,14 +132,25 @@ class BenchmarkResult(BaseModel):
     better_than_count: int
 
 
+class AuthorTrendPoint(BaseModel):
+    date: str
+    score_overall: float
+    score_requirement: float
+    score_security: float
+    score_quality: float
+    score_performance: float
+    pr_number: int
+    pr_title: str
+
+
 # ── AI Review Output Schema ──────────────────────────────────────────────────
 
 class AIReviewOutput(BaseModel):
-    score_overall: float = Field(ge=0, le=100)
-    score_requirement: float = Field(ge=0, le=100)
-    score_security: float = Field(ge=0, le=100)
-    score_quality: float = Field(ge=0, le=100)
-    score_performance: float = Field(ge=0, le=100)
+    score_overall: float
+    score_requirement: float
+    score_security: float
+    score_quality: float
+    score_performance: float
     feedback_requirement: str
     feedback_security: str
     feedback_quality: str
@@ -171,3 +182,47 @@ class WebhookResponse(BaseModel):
 
 class SlackWebhookUpdate(BaseModel):
     slack_webhook_url: str = Field(..., description="Slack incoming webhook URL")
+
+
+# ── Repo Config / Scoring Weights Schemas ────────────────────────────────────
+
+class ScoringWeights(BaseModel):
+    requirement: int = Field(default=30, ge=5, le=80)
+    security: int = Field(default=30, ge=5, le=80)
+    quality: int = Field(default=20, ge=5, le=80)
+    performance: int = Field(default=20, ge=5, le=80)
+
+    @model_validator(mode="after")
+    def weights_sum_to_100(self) -> "ScoringWeights":
+        total = self.requirement + self.security + self.quality + self.performance
+        if total != 100:
+            raise ValueError(f"Weights must sum to 100, got {total}")
+        return self
+
+
+class RepoConfigResponse(BaseModel):
+    weights: ScoringWeights
+    scan_threshold: int | None = None
+
+
+class RepoConfigUpdate(BaseModel):
+    weights: ScoringWeights
+    scan_threshold: int | None = Field(default=None, ge=0, le=100, description="Auto-trigger deep scan when PR score falls below this value (None = disabled)")
+
+
+# ── Scan Schedule Schemas ────────────────────────────────────────────────────
+
+class ScanScheduleResponse(BaseModel):
+    id: int
+    repo_id: int
+    frequency: str
+    enabled: bool
+    last_run_at: datetime | None
+    next_run_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ScanScheduleUpdate(BaseModel):
+    frequency: str = Field(..., pattern=r"^(daily|weekly|monthly)$")
+    enabled: bool = True

@@ -61,7 +61,7 @@ export default function SlackSetup({ repoId, currentWebhook, onUpdated }: Props)
       </div>
 
       {success && (
-        <p className="text-sm text-green-600">✅ Slack webhook updated successfully!</p>
+        <p className="text-sm text-green-600">Slack webhook updated successfully.</p>
       )}
       {error && <p className="text-sm text-red-600">{error}</p>}
 

@@ -126,3 +126,119 @@ export function getScoreBg(score: number): string {
   if (score >= 40) return 'bg-yellow-100 text-yellow-800'
   return 'bg-red-100 text-red-800'
 }
+
+// ── Public Repo Analytics (Feature 1) ─────────────────────────────────────────
+
+export interface ContributorInfo {
+  login: string
+  contributions: number
+  avatar_url: string
+}
+
+export interface PublicRepoData {
+  full_name: string
+  description: string | null
+  homepage: string | null
+  topics: string[]
+  stars: number
+  forks: number
+  open_issues: number
+  watchers: number
+  language: string | null
+  languages: Record<string, number>
+  language_percentages: Record<string, number>
+  created_at: string
+  pushed_at: string
+  license: string | null
+  default_branch: string
+  contributors: ContributorInfo[]
+  commits_last_30_days: number
+  health_score: number
+}
+
+// ── Deep Scan (Feature 2) ──────────────────────────────────────────────────────
+
+export interface DeepScanResult {
+  id: number
+  repo_id: number
+  owner: string
+  repo_name: string
+  overall_score: number
+  architecture_score: number
+  security_score: number
+  duplication_score: number
+  documentation_score: number
+  test_coverage_score: number
+  critical_findings: string[]
+  warnings: string[]
+  positive_observations: string[]
+  architecture_feedback: string
+  security_feedback: string
+  duplication_feedback: string
+  documentation_feedback: string
+  test_coverage_feedback: string
+  recommended_actions: string[]
+  files_analyzed: number
+  created_at: string
+}
+
+export interface DeepScanHistoryItem {
+  id: number
+  overall_score: number
+  files_analyzed: number
+  created_at: string
+}
+
+export interface DeepScanTriggerResponse {
+  status: string
+  task_id: string
+  repo_id: number
+}
+
+// ── Repository Preview (Feature 3) ────────────────────────────────────────────
+
+export interface RepositoryPreview {
+  readme_markdown: string
+  live_urls: string[]
+  last_updated: string
+}
+
+// ── Repo Config / Scoring Weights ─────────────────────────────────────────────
+
+export interface ScoringWeights {
+  requirement: number
+  security: number
+  quality: number
+  performance: number
+}
+
+export interface RepoConfig {
+  weights: ScoringWeights
+  scan_threshold: number | null
+}
+
+// ── Scan Schedule ─────────────────────────────────────────────────────────────
+
+export type ScanFrequency = 'daily' | 'weekly' | 'monthly'
+
+export interface ScanSchedule {
+  id: number
+  repo_id: number
+  frequency: ScanFrequency
+  enabled: boolean
+  last_run_at: string | null
+  next_run_at: string
+}
+
+// ── Author Trend ──────────────────────────────────────────────────────────────
+
+export interface AuthorTrendPoint {
+  date: string
+  score_overall: number
+  score_requirement: number
+  score_security: number
+  score_quality: number
+  score_performance: number
+  pr_number: number
+  pr_title: string
+}

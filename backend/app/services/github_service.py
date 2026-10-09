@@ -22,7 +22,10 @@ _token_cache: dict[int, tuple[str, float]] = {}
 
 def _generate_app_jwt() -> str:
     """Generate a GitHub App JWT signed with the private key, valid for 10 minutes."""
-    private_key = Path(settings.github_private_key_path).read_text()
+    if settings.github_private_key:
+        private_key = settings.github_private_key.replace("\\n", "\n")
+    else:
+        private_key = Path(settings.github_private_key_path).read_text()
     now = int(time.time())
     payload = {
         "iat": now - 60,   # issued 60s ago to handle clock drift

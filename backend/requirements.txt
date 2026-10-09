@@ -13,3 +13,12 @@ pydantic-settings==2.13.1
 python-multipart==0.0.22
 PyJWT==2.12.1
 cryptography==46.0.5
+openai==1.82.0
+slowapi==0.1.9
+pytest==8.3.2
+pytest-asyncio==0.23.8
+respx==0.21.1
+factory-boy==3.3.1
+resend==2.4.0
+reportlab==4.2.5
+matplotlib==3.10.8

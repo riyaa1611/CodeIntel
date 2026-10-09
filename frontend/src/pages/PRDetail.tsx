@@ -5,6 +5,7 @@ import type { PRReview } from '../types'
 import { getScoreBg, getScoreEmoji } from '../types'
 import BenchmarkBadge from '../components/BenchmarkBadge'
 import RadarChart from '../components/RadarChart'
+import PRDiffViewer from '../components/PRDiffViewer'
 
 function ScorePill({ score }: { score: number }) {
   return (
@@ -27,16 +28,16 @@ function Section({
 }) {
   const [open, setOpen] = useState(defaultOpen)
   return (
-    <div className="border border-gray-200 rounded-xl overflow-hidden">
+    <div className="border border-gray-200 dark:border-gray-700 rounded-xl overflow-hidden">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="w-full flex items-center justify-between px-5 py-4 text-left bg-white hover:bg-gray-50 transition-colors"
+        className="w-full flex items-center justify-between px-5 py-4 text-left bg-white dark:bg-gray-800 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
       >
-        <span className="font-medium text-gray-800">{title}</span>
-        <span className="text-gray-400 text-lg">{open ? '▲' : '▼'}</span>
+        <span className="font-medium text-gray-800 dark:text-gray-100">{title}</span>
+        <span className="text-gray-400 dark:text-gray-500 text-lg">{open ? '▲' : '▼'}</span>
       </button>
       {open && (
-        <div className="px-5 py-4 border-t border-gray-100 bg-gray-50 text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
+        <div className="px-5 py-4 border-t border-gray-100 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 text-sm text-gray-700 dark:text-gray-300 leading-relaxed whitespace-pre-wrap">
           {children}
         </div>
       )}
@@ -55,7 +56,7 @@ function CopyButton({ text }: { text: string }) {
   return (
     <button
       onClick={copy}
-      className="ml-2 text-xs text-blue-500 hover:text-blue-700"
+      className="ml-2 text-xs text-blue-500 hover:text-blue-700 dark:hover:text-blue-300"
     >
       {copied ? '✓ Copied' : 'Copy'}
     </button>
@@ -80,7 +81,7 @@ export default function PRDetail() {
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center">
+      <div className="flex min-h-screen items-center justify-center bg-gray-50 dark:bg-gray-950">
         <div className="h-8 w-8 animate-spin rounded-full border-2 border-blue-600 border-t-transparent" />
       </div>
     )
@@ -88,8 +89,8 @@ export default function PRDetail() {
 
   if (error || !review) {
     return (
-      <div className="flex min-h-screen flex-col items-center justify-center gap-4">
-        <div className="rounded-lg bg-red-50 border border-red-200 p-6 text-red-700">
+      <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-gray-50 dark:bg-gray-950">
+        <div className="rounded-lg bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 p-6 text-red-700 dark:text-red-400">
           {error ?? 'Review not found'}
         </div>
         <button onClick={() => navigate(-1)} className="btn-secondary">
@@ -100,18 +101,18 @@ export default function PRDetail() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
+      <header className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 sticky top-0 z-10">
         <div className="mx-auto max-w-5xl px-4 sm:px-6 lg:px-8">
           <div className="flex h-14 items-center gap-4">
             <button
               onClick={() => navigate(-1)}
-              className="text-sm text-gray-500 hover:text-gray-800 flex items-center gap-1"
+              className="text-sm text-gray-500 hover:text-gray-800 dark:hover:text-gray-200 flex items-center gap-1"
             >
               ← Back
             </button>
-            <span className="text-lg font-bold text-blue-600">🤖 CodeIntel</span>
+            <span className="text-lg font-bold text-blue-600">CodeIntel</span>
           </div>
         </div>
       </header>
@@ -124,17 +125,17 @@ export default function PRDetail() {
               <p className="text-xs font-medium text-blue-600 uppercase tracking-wide mb-1">
                 Pull Request #{review.pr_number}
               </p>
-              <h1 className="text-xl font-bold text-gray-900">
+              <h1 className="text-xl font-bold text-gray-900 dark:text-gray-100">
                 {review.pr_title}
               </h1>
-              <p className="mt-1 text-sm text-gray-500">
+              <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
                 by @{review.pr_author} ·{' '}
                 {new Date(review.created_at).toLocaleString()}
               </p>
             </div>
             <div className="flex flex-col items-end gap-2">
               <ScorePill score={review.score_overall} />
-              <span className="text-xs text-gray-400 font-mono">
+              <span className="text-xs text-gray-400 dark:text-gray-500 font-mono">
                 {review.head_sha.slice(0, 8)}
               </span>
             </div>
@@ -152,17 +153,17 @@ export default function PRDetail() {
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
           {/* Dimension scores */}
           <div className="card space-y-3">
-            <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
+            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">
               Dimension Scores
             </h2>
             {[
-              { label: '✅ Requirement Alignment', score: review.score_requirement },
-              { label: '🔒 Security', score: review.score_security },
-              { label: '🏗️ Code Quality', score: review.score_quality },
-              { label: '⚡ Performance', score: review.score_performance },
+              { label: 'Requirement Alignment', score: review.score_requirement },
+              { label: 'Security', score: review.score_security },
+              { label: 'Code Quality', score: review.score_quality },
+              { label: 'Performance', score: review.score_performance },
             ].map(({ label, score }) => (
               <div key={label} className="flex items-center justify-between">
-                <span className="text-sm text-gray-700">{label}</span>
+                <span className="text-sm text-gray-700 dark:text-gray-300">{label}</span>
                 <ScorePill score={score} />
               </div>
             ))}
@@ -170,7 +171,7 @@ export default function PRDetail() {
 
           {/* Radar chart */}
           <div className="card">
-            <h2 className="mb-2 text-sm font-semibold text-gray-700 uppercase tracking-wide">
+            <h2 className="mb-2 text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">
               Score Radar
             </h2>
             <RadarChart
@@ -184,13 +185,13 @@ export default function PRDetail() {
 
         {/* Critical Issues */}
         {review.critical_issues.length > 0 && (
-          <div className="card border-red-200 bg-red-50">
-            <h2 className="mb-3 text-sm font-semibold text-red-700 uppercase tracking-wide">
-              🚨 Critical Issues
+          <div className="card border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20">
+            <h2 className="mb-3 text-sm font-semibold text-red-700 dark:text-red-400 uppercase tracking-wide">
+              Critical Issues
             </h2>
             <ul className="space-y-2">
               {review.critical_issues.map((issue, i) => (
-                <li key={i} className="flex items-start gap-2 text-sm text-red-800">
+                <li key={i} className="flex items-start gap-2 text-sm text-red-800 dark:text-red-300">
                   <span className="mt-0.5 text-red-500">●</span>
                   {issue}
                 </li>
@@ -201,13 +202,13 @@ export default function PRDetail() {
 
         {/* Warnings */}
         {review.warnings.length > 0 && (
-          <div className="card border-yellow-200 bg-yellow-50">
-            <h2 className="mb-3 text-sm font-semibold text-yellow-700 uppercase tracking-wide">
-              ⚠️ Warnings
+          <div className="card border-yellow-200 dark:border-yellow-800 bg-yellow-50 dark:bg-yellow-900/20">
+            <h2 className="mb-3 text-sm font-semibold text-yellow-700 dark:text-yellow-400 uppercase tracking-wide">
+              Warnings
             </h2>
             <ul className="space-y-2">
               {review.warnings.map((w, i) => (
-                <li key={i} className="flex items-start gap-2 text-sm text-yellow-800">
+                <li key={i} className="flex items-start gap-2 text-sm text-yellow-800 dark:text-yellow-300">
                   <span className="mt-0.5 text-yellow-500">●</span>
                   {w}
                 </li>
@@ -218,19 +219,19 @@ export default function PRDetail() {
 
         {/* Dimension Feedback */}
         <div className="space-y-3">
-          <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
+          <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">
             Detailed Feedback
           </h2>
-          <Section title="✅ Requirement Alignment" defaultOpen>
+          <Section title="Requirement Alignment" defaultOpen>
             {review.feedback_requirement}
           </Section>
-          <Section title="🔒 Security">
+          <Section title="Security">
             {review.feedback_security}
           </Section>
-          <Section title="🏗️ Code Quality">
+          <Section title="Code Quality">
             {review.feedback_quality}
           </Section>
-          <Section title="⚡ Performance">
+          <Section title="Performance">
             {review.feedback_performance}
           </Section>
         </div>
@@ -238,17 +239,17 @@ export default function PRDetail() {
         {/* Test Suggestions */}
         {review.test_suggestions.length > 0 && (
           <div className="card">
-            <h2 className="mb-3 text-sm font-semibold text-gray-700 uppercase tracking-wide">
-              🧪 Suggested Test Cases
+            <h2 className="mb-3 text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide">
+              Suggested Test Cases
             </h2>
             <ul className="space-y-2">
               {review.test_suggestions.map((suggestion, i) => (
                 <li
                   key={i}
-                  className="flex items-start justify-between gap-4 rounded-lg bg-gray-50 px-4 py-3 text-sm text-gray-700"
+                  className="flex items-start justify-between gap-4 rounded-lg bg-gray-50 dark:bg-gray-800 px-4 py-3 text-sm text-gray-700 dark:text-gray-200"
                 >
                   <span>
-                    <span className="font-semibold text-gray-500 mr-2">
+                    <span className="font-semibold text-gray-500 dark:text-gray-400 mr-2">
                       {i + 1}.
                     </span>
                     {suggestion}
@@ -260,10 +261,13 @@ export default function PRDetail() {
           </div>
         )}
 
+        {/* PR Diff Viewer */}
+        <PRDiffViewer repoId={Number(repoId)} reviewId={review.id} />
+
         {/* Footer */}
-        <div className="text-center text-xs text-gray-400 py-4">
+        <div className="text-center text-xs text-gray-400 dark:text-gray-500 py-4">
           CodeIntel AI Review · Re-trigger by commenting{' '}
-          <code className="bg-gray-100 px-1 rounded">/codeintel review</code> on
+          <code className="bg-gray-100 dark:bg-gray-800 px-1 rounded">/codeintel review</code> on
           the PR
         </div>
       </main>

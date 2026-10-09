@@ -1,11 +1,214 @@
 import asyncio
+import base64
+import json
 import logging
+import re
+from typing import Any
 
+import httpx
 from celery import Task
+from celery.exceptions import Retry as _CeleryRetry
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# ── Constants for deep scan ───────────────────────────────────────────────────
+GITHUB_API = "https://api.github.com"
+
+_EXCLUDED_DIRS = {
+    "node_modules", ".git", "dist", "build", "vendor", "__pycache__",
+    ".next", ".nuxt", "coverage", ".cache", "target", "out",
+}
+
+_EXCLUDED_EXTENSIONS = {
+    ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".pdf", ".zip",
+    ".exe", ".lock", ".bin", ".jar", ".class", ".pyc", ".pyo", ".so",
+    ".dll", ".woff", ".woff2", ".ttf", ".eot", ".mp3", ".mp4", ".mov",
+    ".min.js", ".min.css",
+}
+
+_CODE_EXTENSIONS = {
+    ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".rb", ".php",
+    ".cs", ".cpp", ".c", ".h", ".rs", ".swift", ".kt", ".scala",
+    ".r", ".jl", ".lua", ".pl", ".sh", ".bash", ".zsh",
+}
+
+_TEST_PATH_PATTERNS = re.compile(
+    r"(test|tests|spec|__tests__|__mocks__|fixtures)[/\\]|"
+    r"\.(test|spec)\.(js|ts|jsx|tsx|py|rb|go|java|cs)$",
+    re.IGNORECASE,
+)
+
+_CONFIG_EXTENSIONS = {
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".env",
+    ".gitignore", ".dockerignore", ".editorconfig",
+}
+
+DEEP_SCAN_LLM_PROMPT = """\
+You are CodeIntel, an expert software architect and security engineer. Analyze the following repository source files and return a structured JSON assessment.
+
+## Repository: {owner}/{repo}
+
+## Source Files Analyzed ({file_count} files)
+
+{file_contents}
+
+## Your Task
+Evaluate this codebase across 6 dimensions and return ONLY valid JSON — no markdown, no fences, no explanation.
+
+Score each dimension 0-100 (100 = excellent):
+1. **architecture_score**: Structure, modularity, separation of concerns, design patterns
+2. **security_score**: Vulnerabilities (OWASP Top 10), hardcoded secrets, injection risks, auth/authz issues
+3. **duplication_score**: DRY adherence, code reuse, repeated logic patterns
+4. **documentation_score**: Comments, docstrings, README quality indicators, self-documenting code
+5. **test_coverage_score**: Presence, quality, and coverage indicators of test files
+
+Compute overall_score as: (architecture*25 + security*25 + duplication*15 + documentation*20 + test_coverage*15) / 100
+
+Return ONLY this JSON:
+{{
+  "overall_score": <0-100>,
+  "architecture_score": <0-100>,
+  "security_score": <0-100>,
+  "duplication_score": <0-100>,
+  "documentation_score": <0-100>,
+  "test_coverage_score": <0-100>,
+  "critical_findings": ["<must-fix issue>", ...],
+  "warnings": ["<should-fix issue>", ...],
+  "positive_observations": ["<strength>", ...],
+  "architecture_feedback": "<detailed paragraph>",
+  "security_feedback": "<detailed paragraph>",
+  "duplication_feedback": "<detailed paragraph>",
+  "documentation_feedback": "<detailed paragraph>",
+  "test_coverage_feedback": "<detailed paragraph>",
+  "recommended_actions": ["<action 1>", "<action 2>", "<action 3>"]
+}}"""
+
+
+def _gh_headers() -> dict[str, str]:
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if settings.github_token:
+        headers["Authorization"] = f"token {settings.github_token}"
+    return headers
+
+
+def _is_excluded_path(path: str) -> bool:
+    parts = path.replace("\\", "/").split("/")
+    for part in parts:
+        if part in _EXCLUDED_DIRS:
+            return True
+    return False
+
+
+def _is_code_file(path: str) -> bool:
+    lower = path.lower()
+    for ext in _EXCLUDED_EXTENSIONS:
+        if lower.endswith(ext):
+            return False
+    for ext in _CODE_EXTENSIONS:
+        if lower.endswith(ext):
+            return True
+    return False
+
+
+def _score_file(path: str) -> int:
+    """Higher score = higher priority. Test and config files score lower."""
+    if _TEST_PATH_PATTERNS.search(path):
+        return 0
+    lower = path.lower()
+    for ext in _CONFIG_EXTENSIONS:
+        if lower.endswith(ext):
+            return 1
+    # Source directories get priority
+    for src_dir in ("src/", "app/", "lib/", "pkg/", "core/", "main"):
+        if src_dir in path.lower():
+            return 10
+    return 5
+
+
+async def _fetch_repo_file_tree(owner: str, repo: str, branch: str) -> list[dict[str, Any]]:
+    """Fetch the full recursive file tree for a repository branch."""
+    headers = _gh_headers()
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            f"{GITHUB_API}/repos/{owner}/{repo}/git/trees/{branch}?recursive=1",
+            headers=headers,
+        )
+        if resp.status_code == 404:
+            # Try 'master' as fallback
+            resp = await client.get(
+                f"{GITHUB_API}/repos/{owner}/{repo}/git/trees/master?recursive=1",
+                headers=headers,
+            )
+        resp.raise_for_status()
+        data = resp.json()
+        return [item for item in data.get("tree", []) if item.get("type") == "blob"]
+
+
+async def _fetch_file_content(owner: str, repo: str, path: str) -> str | None:
+    """Fetch decoded content of a single file from GitHub."""
+    headers = _gh_headers()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(
+                f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}",
+                headers=headers,
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            if data.get("encoding") != "base64" or not data.get("content"):
+                return None
+            content = base64.b64decode(data["content"].replace("\n", "")).decode(
+                "utf-8", errors="replace"
+            )
+            # Truncate very large files
+            if len(content) > 8000:
+                content = content[:8000] + "\n... [truncated]"
+            return content
+    except Exception as exc:
+        logger.debug("Could not fetch %s/%s/%s: %s", owner, repo, path, exc)
+        return None
+
+
+def _run_deep_scan_llm_sync(owner: str, repo: str, file_contents: dict[str, Any]) -> dict[str, Any]:
+    """Synchronous OpenRouter call for deep scan (runs in executor)."""
+    from app.services.ai_service import _call_llm_with_key_fallback
+
+    sections = []
+    for path, content in file_contents.items():
+        sections.append(f"### {path}\n```\n{content}\n```")
+
+    prompt = DEEP_SCAN_LLM_PROMPT.format(
+        owner=owner,
+        repo=repo,
+        file_count=len(file_contents),
+        file_contents="\n\n".join(sections),
+    )
+
+    for attempt in range(1, 4):
+        try:
+            raw = _call_llm_with_key_fallback([{"role": "user", "content": prompt}])
+            if raw.startswith("```"):
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+            return json.loads(raw)
+        except (json.JSONDecodeError, KeyError) as exc:
+            logger.warning("Deep scan LLM attempt %d failed: %s", attempt, exc)
+        except Exception as exc:
+            logger.error("Deep scan LLM attempt %d error: %s", attempt, exc)
+            if attempt == 3:
+                raise
+    raise RuntimeError("Deep scan LLM failed after 3 attempts")
+
+
+async def _run_deep_scan_llm(owner: str, repo: str, file_contents: dict[str, Any]) -> dict[str, Any]:
+    import asyncio
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _run_deep_scan_llm_sync, owner, repo, file_contents)
 
 
 def make_celery():
@@ -26,6 +229,16 @@ def make_celery():
         task_soft_time_limit=100,
         worker_prefetch_multiplier=1,
         task_acks_late=True,
+        beat_schedule={
+            "check-scheduled-deep-scans": {
+                "task": "tasks.check_scheduled_deep_scans",
+                "schedule": 900,  # every 15 minutes
+            },
+            "send-monthly-digests": {
+                "task": "tasks.send_monthly_digests",
+                "schedule": 86400,  # every 24 hours — task itself checks if it's the 1st
+            },
+        },
     )
     return app
 
@@ -87,6 +300,7 @@ def process_pr_review(
             result = loop.run_until_complete(_run())
         finally:
             loop.close()
+            asyncio.set_event_loop(None)
 
         logger.info(
             "Task process_pr_review completed: %s#%d → score=%.1f",
@@ -94,6 +308,40 @@ def process_pr_review(
             pr_number,
             result["score_overall"],
         )
+
+        # Publish real-time event to WebSocket clients
+        try:
+            from app.utils.ws_manager import publish_event_sync
+            from app.database import AsyncSessionLocal
+            from sqlalchemy import select
+            from app.models import Repository
+
+            async def _get_repo_id() -> int | None:
+                async with AsyncSessionLocal() as s:
+                    r = await s.execute(
+                        select(Repository.id).where(Repository.full_name == repo_full_name)
+                    )
+                    return r.scalar_one_or_none()
+
+            _loop = asyncio.new_event_loop()
+            try:
+                repo_id = _loop.run_until_complete(_get_repo_id()) or 0
+            finally:
+                _loop.close()
+
+            publish_event_sync(
+                "review.completed",
+                repo_id,
+                {
+                    "review_id": result["review_id"],
+                    "repo_full_name": repo_full_name,
+                    "pr_number": pr_number,
+                    "score_overall": result["score_overall"],
+                },
+            )
+        except Exception as _exc:
+            logger.warning("Failed to publish review.completed event: %s", _exc)
+
         return result
 
     except Exception as exc:
@@ -115,3 +363,384 @@ def process_pr_review(
                 "repo_full_name": repo_full_name,
                 "pr_number": pr_number,
             }
+
+
+# ── Deep Scan Task ─────────────────────────────────────────────────────────────
+
+@celery_app.task(
+    bind=True,
+    name="tasks.deep_scan_repository",
+    max_retries=1,
+    default_retry_delay=60,
+    time_limit=180,
+    soft_time_limit=160,
+)
+def deep_scan_repository(self: Task, owner: str, repo: str, repo_id: int) -> dict:
+    """
+    Celery task: perform a full AI-powered deep scan of a repository's codebase.
+    Fetches up to 30 source files, sends them to the LLM for analysis, and
+    stores structured results in the deep_scan_results table.
+    Time limit: 180 seconds.
+    """
+    logger.info("Deep scan started: %s/%s (repo_id=%d)", owner, repo, repo_id)
+
+    async def _run() -> dict:
+        from app.database import AsyncSessionLocal
+        from app.models import DeepScanResult, Repository
+        from sqlalchemy import select
+
+        # ── 1. Get default branch ──────────────────────────────────────────────
+        headers = _gh_headers()
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            repo_resp = await client.get(
+                f"{GITHUB_API}/repos/{owner}/{repo}", headers=headers
+            )
+            repo_resp.raise_for_status()
+            default_branch = repo_resp.json().get("default_branch", "main")
+
+        # ── 2. Fetch file tree ─────────────────────────────────────────────────
+        tree = await _fetch_repo_file_tree(owner, repo, default_branch)
+
+        # ── 3. Filter to code files ────────────────────────────────────────────
+        candidates = [
+            item for item in tree
+            if not _is_excluded_path(item["path"]) and _is_code_file(item["path"])
+        ]
+
+        # ── 4. Sort by priority (main source files first) ─────────────────────
+        candidates.sort(key=lambda x: _score_file(x["path"]), reverse=True)
+        selected = candidates[:30]
+
+        # ── 5. Fetch file contents ─────────────────────────────────────────────
+        file_contents: dict[str, str] = {}
+        for item in selected:
+            content = await _fetch_file_content(owner, repo, item["path"])
+            if content:
+                file_contents[item["path"]] = content
+
+        if not file_contents:
+            raise RuntimeError(f"No readable source files found in {owner}/{repo}")
+
+        # Publish progress event: files fetched, starting LLM analysis
+        try:
+            from app.utils.ws_manager import publish_event_sync
+            publish_event_sync(
+                "scan.progress",
+                repo_id,
+                {"stage": "analyzing", "files_fetched": len(file_contents), "owner": owner, "repo": repo},
+            )
+        except Exception as _exc:
+            logger.warning("Failed to publish scan.progress event: %s", _exc)
+
+        # ── 6. Call LLM ────────────────────────────────────────────────────────
+        llm_result = await _run_deep_scan_llm(owner, repo, file_contents)
+
+        def _clamp(v: Any) -> float:
+            try:
+                return max(0.0, min(100.0, float(v)))
+            except (TypeError, ValueError):
+                return 0.0
+
+        # ── 7. Save to DB ──────────────────────────────────────────────────────
+        async with AsyncSessionLocal() as session:
+            scan = DeepScanResult(
+                repo_id=repo_id,
+                owner=owner,
+                repo_name=repo,
+                overall_score=_clamp(llm_result.get("overall_score", 0)),
+                architecture_score=_clamp(llm_result.get("architecture_score", 0)),
+                security_score=_clamp(llm_result.get("security_score", 0)),
+                duplication_score=_clamp(llm_result.get("duplication_score", 0)),
+                documentation_score=_clamp(llm_result.get("documentation_score", 0)),
+                test_coverage_score=_clamp(llm_result.get("test_coverage_score", 0)),
+                critical_findings=llm_result.get("critical_findings", []),
+                warnings=llm_result.get("warnings", []),
+                positive_observations=llm_result.get("positive_observations", []),
+                recommended_actions=llm_result.get("recommended_actions", []),
+                architecture_feedback=llm_result.get("architecture_feedback", ""),
+                security_feedback=llm_result.get("security_feedback", ""),
+                duplication_feedback=llm_result.get("duplication_feedback", ""),
+                documentation_feedback=llm_result.get("documentation_feedback", ""),
+                test_coverage_feedback=llm_result.get("test_coverage_feedback", ""),
+                files_analyzed=len(file_contents),
+            )
+            session.add(scan)
+            await session.flush()
+            scan_id = scan.id
+            await session.commit()
+
+        logger.info(
+            "Deep scan completed: %s/%s → overall=%.1f (files=%d, scan_id=%d)",
+            owner,
+            repo,
+            scan.overall_score,
+            len(file_contents),
+            scan_id,
+        )
+
+        # Publish scan.completed event
+        try:
+            from app.utils.ws_manager import publish_event_sync
+            publish_event_sync(
+                "scan.completed",
+                repo_id,
+                {
+                    "scan_id": scan_id,
+                    "owner": owner,
+                    "repo": repo,
+                    "overall_score": scan.overall_score,
+                    "files_analyzed": len(file_contents),
+                },
+            )
+        except Exception as _exc:
+            logger.warning("Failed to publish scan.completed event: %s", _exc)
+
+        return {
+            "scan_id": scan_id,
+            "owner": owner,
+            "repo": repo,
+            "overall_score": scan.overall_score,
+            "files_analyzed": len(file_contents),
+        }
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(_run())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+        return result
+
+    except Exception as exc:
+        logger.error(
+            "Deep scan failed for %s/%s: %s", owner, repo, exc, exc_info=True
+        )
+        try:
+            raise self.retry(exc=exc)
+        except self.MaxRetriesExceededError:
+            logger.error("Max retries exceeded for deep scan %s/%s — giving up", owner, repo)
+            return {"error": str(exc), "owner": owner, "repo": repo}
+
+
+@celery_app.task(
+    name="tasks.send_monthly_digests",
+    time_limit=120,
+    soft_time_limit=100,
+)
+def send_monthly_digests() -> dict:
+    """
+    Celery Beat task — runs daily but only sends emails on the 1st of each month.
+    Queries all repos, computes last-30-day stats, sends digest to opted-in users.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    now = datetime.now(tz=timezone.utc)
+    if now.day != 1:
+        return {"skipped": True, "reason": f"Not the 1st (today is {now.day})"}
+
+    month_label = now.strftime("%B %Y")
+
+    async def _run() -> dict:
+        from sqlalchemy import func, select
+        from app.database import AsyncSessionLocal
+        from app.models import PRReview, Repository, User
+        from app.services.email_service import send_monthly_digest
+
+        cutoff = now - timedelta(days=30)
+
+        async with AsyncSessionLocal() as session:
+            # All opted-in user emails
+            user_result = await session.execute(
+                select(User.email).where(
+                    User.email.is_not(None),
+                    User.email_preferences["monthly_digest"].astext == "true",
+                )
+            )
+            digest_emails = [r for (r,) in user_result.all() if r]
+            if not digest_emails:
+                return {"sent": 0, "reason": "No opted-in users"}
+
+            # Per-repo stats
+            repos_result = await session.execute(select(Repository))
+            repos = repos_result.scalars().all()
+
+            sent = 0
+            for repo in repos:
+                stats_result = await session.execute(
+                    select(
+                        func.count().label("total"),
+                        func.avg(PRReview.score_overall).label("avg_overall"),
+                        func.avg(PRReview.score_security).label("avg_security"),
+                        func.avg(PRReview.score_quality).label("avg_quality"),
+                        func.avg(PRReview.score_requirement).label("avg_req"),
+                        func.avg(PRReview.score_performance).label("avg_perf"),
+                    ).where(
+                        PRReview.repo_id == repo.id,
+                        PRReview.created_at >= cutoff,
+                    )
+                )
+                stats = stats_result.one()
+                if not stats.total:
+                    continue
+
+                authors_result = await session.execute(
+                    select(
+                        PRReview.pr_author.label("author"),
+                        func.count().label("pr_count"),
+                        func.avg(PRReview.score_overall).label("avg_overall"),
+                    )
+                    .where(PRReview.repo_id == repo.id, PRReview.created_at >= cutoff)
+                    .group_by(PRReview.pr_author)
+                    .order_by(func.avg(PRReview.score_overall).desc())
+                    .limit(10)
+                )
+                top_authors = [
+                    {"author": r.author, "pr_count": r.pr_count, "avg_overall": float(r.avg_overall or 0)}
+                    for r in authors_result.all()
+                ]
+
+                import asyncio as _aio
+                await _aio.get_running_loop().run_in_executor(
+                    None,
+                    lambda r=repo, s=stats, a=top_authors: send_monthly_digest(
+                        to=digest_emails,
+                        repo_full_name=r.full_name,
+                        total_reviews=s.total,
+                        avg_overall=float(s.avg_overall or 0),
+                        avg_security=float(s.avg_security or 0),
+                        avg_quality=float(s.avg_quality or 0),
+                        avg_requirement=float(s.avg_req or 0),
+                        avg_performance=float(s.avg_perf or 0),
+                        top_authors=a,
+                        month_label=month_label,
+                    ),
+                )
+                sent += 1
+
+        return {"sent": sent, "recipients": len(digest_emails), "month": month_label}
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(_run())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+        logger.info("send_monthly_digests: %s", result)
+        return result
+    except Exception as exc:
+        logger.error("send_monthly_digests failed: %s", exc, exc_info=True)
+        return {"error": str(exc)}
+
+
+@celery_app.task(
+    name="tasks.check_scheduled_deep_scans",
+    time_limit=60,
+    soft_time_limit=50,
+)
+def check_scheduled_deep_scans() -> dict:
+    """
+    Celery Beat task — runs every 15 minutes.
+    Finds enabled scan schedules whose next_run_at has passed and dispatches
+    deep_scan_repository for each overdue repo.
+    """
+    from datetime import datetime, timezone
+
+    async def _run() -> list[dict]:
+        from sqlalchemy import select
+        from app.database import AsyncSessionLocal
+        from app.models import Repository, ScanSchedule
+
+        now = datetime.now(tz=timezone.utc)
+
+        dispatched = []
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(ScanSchedule, Repository)
+                .join(Repository, ScanSchedule.repo_id == Repository.id)
+                .where(ScanSchedule.enabled.is_(True), ScanSchedule.next_run_at <= now)
+            )
+            rows = result.all()
+
+            for sched, repo in rows:
+                deep_scan_repository.delay(repo.owner, repo.name, repo.id)
+                logger.info(
+                    "Scheduled deep scan dispatched: %s/%s (freq=%s)",
+                    repo.owner, repo.name, sched.frequency,
+                )
+
+                from datetime import timedelta
+                delta_map = {"daily": timedelta(days=1), "weekly": timedelta(days=7), "monthly": timedelta(days=30)}
+                delta = delta_map.get(sched.frequency, timedelta(days=7))
+                sched.last_run_at = now
+                sched.next_run_at = now + delta
+                dispatched.append({"repo": repo.full_name, "freq": sched.frequency})
+
+            await session.commit()
+
+        return dispatched
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            dispatched = loop.run_until_complete(_run())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+        logger.info("check_scheduled_deep_scans: dispatched %d scan(s)", len(dispatched))
+        return {"dispatched": dispatched}
+    except Exception as exc:
+        logger.error("check_scheduled_deep_scans failed: %s", exc, exc_info=True)
+        return {"error": str(exc)}
+
+
+import traceback as _tb_module
+from celery.signals import task_failure as _celery_task_failure
+
+
+@_celery_task_failure.connect
+def on_task_failure(sender=None, task_id=None, exception=None,
+                    args=None, kwargs=None, traceback=None, einfo=None, **rest):
+    """Write failed Celery tasks to task_failures table after max retries exhausted."""
+    # Skip intermediate retries — only record genuine final failures
+    if isinstance(exception, _CeleryRetry):
+        return
+    task_name = getattr(sender, "name", str(sender))
+    error_msg = str(exception) if exception else "Unknown error"
+    tb_text = "".join(_tb_module.format_tb(traceback)) if traceback else None
+
+    task_args_data: dict = {}
+    if args:
+        task_args_data["args"] = list(args)
+    if kwargs:
+        task_args_data["kwargs"] = kwargs
+
+    async def _write():
+        from app.database import AsyncSessionLocal
+        from app.models import TaskFailure
+
+        async with AsyncSessionLocal() as session:
+            failure = TaskFailure(
+                task_name=task_name,
+                task_args=task_args_data,
+                error_message=error_msg,
+                traceback_text=tb_text,
+            )
+            session.add(failure)
+            await session.commit()
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(_write())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+        logger.info("TaskFailure recorded for task: %s", task_name)
+    except Exception as exc:
+        logger.error("Failed to record TaskFailure: %s", exc)
