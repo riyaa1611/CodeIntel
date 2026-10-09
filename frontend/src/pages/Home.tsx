@@ -1,19 +1,41 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { createRepo, listRepos } from '../api/client'
 import type { Repository } from '../types'
 import Dashboard from '../components/Dashboard'
 import PRTable from '../components/PRTable'
 import Leaderboard from '../components/Leaderboard'
 import SlackSetup from '../components/SlackSetup'
+import ScoringWeightsSliders from '../components/ScoringWeightsSliders'
+import ScanScheduler from '../components/ScanScheduler'
+import ExportPanel from '../components/ExportPanel'
 import PublicRepoSearch from '../components/PublicRepoSearch'
 import DeepScanPanel from '../components/DeepScanPanel'
 import RepositoryPreview from '../components/RepositoryPreview'
 import { useAuth } from '@/contexts/AuthContext'
+import { useToast } from '@/contexts/ToastContext'
+import { useWebSocket, type WsEvent } from '@/hooks/useWebSocket'
+import DarkModeToggle from '@/components/DarkModeToggle'
 
 type Tab = 'overview' | 'reviews' | 'leaderboard' | 'settings' | 'deep_scan'
 
 export default function Home() {
   const { user, logout } = useAuth()
+  const { addToast } = useToast()
+
+  const handleWsEvent = useCallback((event: WsEvent) => {
+    if (event.type === 'review.completed') {
+      const d = event.data as { pr_number: number; score_overall: number; repo_full_name: string }
+      addToast('success', `PR #${d.pr_number} reviewed`, `${d.repo_full_name} — score ${d.score_overall.toFixed(1)}`)
+    } else if (event.type === 'scan.progress') {
+      addToast('info', 'Deep scan running', `Analyzing ${event.data.files_fetched as number} files…`)
+    } else if (event.type === 'scan.completed') {
+      const d = event.data as { overall_score: number; repo: string }
+      addToast('success', 'Deep scan complete', `${d.repo} — score ${d.overall_score.toFixed(1)}`)
+    }
+  }, [addToast])
+
+  useWebSocket(handleWsEvent)
+
   const [repos, setRepos] = useState<Repository[]>([])
   const [selectedRepo, setSelectedRepo] = useState<Repository | null>(null)
   const [reposLoading, setReposLoading] = useState(true)
@@ -42,11 +64,21 @@ export default function Home() {
 
   const handleAddRepo = async () => {
     if (!newRepoName.trim()) return
+    // Accept full GitHub URLs
+    let repoName = newRepoName.trim()
+    const urlMatch = repoName.match(/github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/)
+    if (urlMatch) repoName = urlMatch[1]
+
+    if (!/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(repoName)) {
+      setAddRepoError('Please enter in owner/repo format (e.g. riyaa1611/CodeIntel)')
+      return
+    }
+
     setAddingRepo(true)
     setAddRepoError(null)
     try {
       const repo = await createRepo({
-        github_repo_full_name: newRepoName.trim(),
+        github_repo_full_name: repoName,
         slack_webhook_url: newSlackUrl.trim() || undefined,
       })
       setRepos((prev) => [repo, ...prev])
@@ -55,9 +87,13 @@ export default function Home() {
       setNewSlackUrl('')
       setShowAddRepo(false)
     } catch (err: any) {
-      const msg =
-        err?.response?.data?.detail ?? 'Failed to add repository'
-      setAddRepoError(typeof msg === 'string' ? msg : JSON.stringify(msg))
+      const detail = err?.response?.data?.detail
+      const msg = Array.isArray(detail)
+        ? 'Invalid input: ' + detail.map((d: any) => d.msg).join(', ')
+        : typeof detail === 'string'
+        ? detail
+        : 'Failed to add repository'
+      setAddRepoError(msg)
     } finally {
       setAddingRepo(false)
     }
@@ -72,13 +108,13 @@ export default function Home() {
   ]
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 dark:bg-gray-950">
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-10">
+      <header className="bg-white border-b border-gray-200 sticky top-0 z-10 dark:bg-gray-900 dark:border-gray-700">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <div className="flex h-14 items-center justify-between">
             <div className="flex items-center gap-3">
-              <span className="text-xl font-bold text-blue-600">🤖 CodeIntel</span>
+              <span className="text-xl font-bold text-blue-600">CodeIntel</span>
               <span className="hidden text-sm text-gray-400 sm:block">
                 AI PR Review Dashboard
               </span>
@@ -123,11 +159,12 @@ export default function Home() {
               </button>
 
               <div className="flex items-center gap-3">
+                <DarkModeToggle />
                 {user?.avatar_url && (
                   <img src={user.avatar_url} alt={user.username}
                     className="w-8 h-8 rounded-full border border-gray-200" />
                 )}
-                <span className="text-sm text-gray-600">{user?.username}</span>
+                <span className="text-sm text-gray-600 dark:text-gray-300">{user?.username}</span>
                 <button onClick={logout}
                   className="text-sm text-red-500 hover:text-red-700 transition">
                   Logout
@@ -140,11 +177,11 @@ export default function Home() {
 
       {/* Add repo form */}
       {showAddRepo && (
-        <div className="bg-blue-50 border-b border-blue-100">
+        <div className="bg-blue-50 dark:bg-gray-900 border-b border-blue-100 dark:border-gray-700/50">
           <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-4">
             <div className="flex flex-wrap items-end gap-3">
               <div className="flex-1 min-w-56">
-                <label className="block text-xs font-medium text-gray-600 mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">
                   GitHub Repo (owner/name)
                 </label>
                 <input
@@ -157,7 +194,7 @@ export default function Home() {
                 />
               </div>
               <div className="flex-1 min-w-56">
-                <label className="block text-xs font-medium text-gray-600 mb-1">
+                <label className="block text-xs font-medium text-gray-600 dark:text-gray-300 mb-1">
                   Slack Webhook URL (optional)
                 </label>
                 <input
@@ -185,12 +222,11 @@ export default function Home() {
 
       {/* Main content */}
       <main className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-6">
-        {/* Public Repo Search — always visible above connected repos */}
-        <PublicRepoSearch />
+        {/* Public Repo Search — auto-loads selected repo analytics */}
+        <PublicRepoSearch repoFullName={selectedRepo?.full_name ?? null} />
 
         {!selectedRepo ? (
           <div className="flex flex-col items-center justify-center py-16 text-center">
-            <div className="text-5xl mb-4">🤖</div>
             <h2 className="text-xl font-semibold text-gray-700">
               Welcome to CodeIntel
             </h2>
@@ -203,7 +239,7 @@ export default function Home() {
           <>
             {/* Repo title */}
             <div className="mb-6">
-              <h1 className="text-xl font-bold text-gray-900">
+              <h1 className="text-xl font-bold text-gray-900 dark:text-white">
                 {selectedRepo.full_name}
               </h1>
               <p className="text-sm text-gray-500 mt-0.5">
@@ -264,19 +300,30 @@ export default function Home() {
             )}
 
             {activeTab === 'settings' && (
-              <div className="card max-w-2xl">
-                <h2 className="mb-4 text-base font-semibold text-gray-800">
-                  Slack Notifications
-                </h2>
-                <SlackSetup
-                  repoId={selectedRepo.id}
-                  currentWebhook={selectedRepo.slack_webhook_url}
-                  onUpdated={(url) =>
-                    setSelectedRepo((r) =>
-                      r ? { ...r, slack_webhook_url: url } : r
-                    )
-                  }
-                />
+              <div className="space-y-6 max-w-2xl">
+                <div className="card">
+                  <h2 className="mb-4 text-base font-semibold text-gray-800 dark:text-gray-100">
+                    Slack Notifications
+                  </h2>
+                  <SlackSetup
+                    repoId={selectedRepo.id}
+                    currentWebhook={selectedRepo.slack_webhook_url}
+                    onUpdated={(url) =>
+                      setSelectedRepo((r) =>
+                        r ? { ...r, slack_webhook_url: url } : r
+                      )
+                    }
+                  />
+                </div>
+                <div className="card">
+                  <ScoringWeightsSliders repoId={selectedRepo.id} />
+                </div>
+                <div className="card">
+                  <ScanScheduler repoId={selectedRepo.id} />
+                </div>
+                <div className="card">
+                  <ExportPanel repoId={selectedRepo.id} />
+                </div>
               </div>
             )}
           </>

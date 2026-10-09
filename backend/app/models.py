@@ -29,6 +29,9 @@ class Repository(Base):
     owner: Mapped[str] = mapped_column(String(128), nullable=False)
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     slack_webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    repo_config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default="{}"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -133,6 +136,25 @@ class TaskFailure(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
     )
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class ScanSchedule(Base):
+    __tablename__ = "scan_schedules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    repo_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+    )
+    frequency: Mapped[str] = mapped_column(String(16), nullable=False)  # daily | weekly | monthly
+    enabled: Mapped[bool] = mapped_column(server_default="true", default=True, nullable=False)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
 
 
 class User(Base):

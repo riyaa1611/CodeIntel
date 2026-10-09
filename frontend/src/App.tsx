@@ -1,7 +1,10 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { AuthProvider, useAuth } from '@/contexts/AuthContext'
+import { ToastProvider } from '@/contexts/ToastContext'
+import ToastContainer from '@/components/ToastContainer'
 import Home from '@/pages/Home'
 import PRDetail from '@/pages/PRDetail'
+import AuthorTrend from '@/pages/AuthorTrend'
 import Login from '@/pages/Login'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -20,16 +23,23 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 export default function App() {
   return (
     <AuthProvider>
-      <BrowserRouter>
-        <Routes>
-          <Route path="/login" element={<Login />} />
-          <Route path="/" element={<ProtectedRoute><Home /></ProtectedRoute>} />
-          <Route
-            path="/repos/:repoId/reviews/:reviewId"
-            element={<ProtectedRoute><PRDetail /></ProtectedRoute>}
-          />
-        </Routes>
-      </BrowserRouter>
+      <ToastProvider>
+        <BrowserRouter>
+          <ToastContainer />
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route path="/" element={<ProtectedRoute><Home /></ProtectedRoute>} />
+            <Route
+              path="/repos/:repoId/reviews/:reviewId"
+              element={<ProtectedRoute><PRDetail /></ProtectedRoute>}
+            />
+            <Route
+              path="/repos/:repoId/authors/:author"
+              element={<ProtectedRoute><AuthorTrend /></ProtectedRoute>}
+            />
+          </Routes>
+        </BrowserRouter>
+      </ToastProvider>
     </AuthProvider>
   )
 }

@@ -37,7 +37,7 @@ async def login():
     )
 
 
-@router.get("/callback")
+@router.get("/github/callback")
 async def callback(code: str, db: AsyncSession = Depends(get_db)):
     """Exchange OAuth code for GitHub token, upsert user, set session cookie."""
     async with httpx.AsyncClient() as client:

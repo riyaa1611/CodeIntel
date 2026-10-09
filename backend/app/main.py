@@ -23,9 +23,21 @@ logger = logging.getLogger(__name__)
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+    from app.utils.ws_manager import redis_listener
+
     logger.info("CodeIntel API starting up (env=%s)", settings.app_env)
     await init_db()
+
+    listener_task = asyncio.create_task(redis_listener())
+
     yield
+
+    listener_task.cancel()
+    try:
+        await listener_task
+    except asyncio.CancelledError:
+        pass
     await close_db()
     logger.info("CodeIntel API shut down")
 
@@ -65,6 +77,7 @@ from app.api.deep_scan import router as deep_scan_router
 from app.api.preview import router as preview_router
 from app.api.public import router as public_router
 from app.api.webhooks import router as webhooks_router
+from app.api.websocket import router as websocket_router
 
 app.include_router(auth_router)
 app.include_router(webhooks_router)
@@ -73,23 +86,13 @@ app.include_router(public_router)
 app.include_router(deep_scan_router)
 app.include_router(preview_router)
 app.include_router(admin_router)
+app.include_router(websocket_router)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
 @app.get("/health", tags=["system"])
 async def health_check():
     return JSONResponse(content={"status": "ok", "service": "codeintel-api"})
-
-
-@app.get("/", tags=["system"])
-async def root():
-    return JSONResponse(
-        content={
-            "service": "CodeIntel API",
-            "version": "1.0.0",
-            "docs": "/docs",
-        }
-    )
 
 
 # ── Frontend static file serving ──────────────────────────────────────────────
@@ -106,10 +109,21 @@ if _frontend_dist.exists():
             name="frontend-assets",
         )
 
+    @app.get("/", include_in_schema=False)
     @app.get("/{full_path:path}", include_in_schema=False)
-    async def serve_spa(full_path: str):
+    async def serve_spa(full_path: str = ""):
         """Serve the React SPA index.html for all unmatched paths (enables client-side routing)."""
         index_file = _frontend_dist / "index.html"
         if index_file.exists():
             return FileResponse(str(index_file))
         return JSONResponse({"detail": "Frontend not built. Run: npm run build"}, status_code=404)
+else:
+    @app.get("/", tags=["system"])
+    async def root():
+        return JSONResponse(
+            content={
+                "service": "CodeIntel API",
+                "version": "1.0.0",
+                "docs": "/docs",
+            }
+        )

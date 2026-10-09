@@ -203,6 +203,10 @@ async def run_pr_review(
         f"#{linked_issue['number']}" if linked_issue else "none",
     )
 
+    # ── Step 1b: Load repo record early (to get custom weights) ──────────
+    repo = await _get_or_create_repository(session, repo_full_name, installation_id)
+    weights: dict[str, int] | None = (repo.repo_config or {}).get("weights")
+
     # ── Step 2: AI Review ─────────────────────────────────────────────────
     ai_result: AIReviewOutput = await ai_service.generate_review(
         diff=diff,
@@ -211,10 +215,10 @@ async def run_pr_review(
         linked_issue=linked_issue,
         repo_language=repo_meta.get("language", "Unknown"),
         repo_description=repo_meta.get("description", ""),
+        weights=weights,
     )
 
     # ── Step 3: Persist ───────────────────────────────────────────────────
-    repo = await _get_or_create_repository(session, repo_full_name, installation_id)
 
     # Check if a review for this exact sha already exists
     existing_result = await session.execute(
@@ -305,12 +309,65 @@ async def run_pr_review(
             pr_url=pr_url,
         )
 
+    # ── Step 6b: Gather email recipients before committing session ────────
+    alert_emails: list[str] = []
+    try:
+        from sqlalchemy import select as _sel
+        from app.models import User as _User
+
+        user_result = await session.execute(
+            _sel(_User.email).where(
+                _User.email.is_not(None),
+                _User.email_preferences["review_alerts"].astext == "true",
+            )
+        )
+        alert_emails = [r for (r,) in user_result.all() if r]
+    except Exception as exc:
+        logger.warning("Failed to query review alert recipients: %s", exc)
+
     await session.commit()
+
+    # ── Step 6c: Send email alert (after commit — non-critical) ──────────
+    if alert_emails:
+        try:
+            from app.services.email_service import send_review_alert as _send_alert
+            import asyncio as _aio
+            pr_url = f"https://github.com/{repo_full_name}/pull/{pr_number}"
+            await _aio.get_running_loop().run_in_executor(
+                None,
+                lambda: _send_alert(
+                    to=alert_emails,
+                    repo_full_name=repo_full_name,
+                    pr_number=pr_number,
+                    pr_title=pr_details["title"],
+                    pr_author=pr_details["author"],
+                    score_overall=ai_result.score_overall,
+                    score_requirement=ai_result.score_requirement,
+                    score_security=ai_result.score_security,
+                    score_quality=ai_result.score_quality,
+                    score_performance=ai_result.score_performance,
+                    critical_issues=ai_result.critical_issues,
+                    pr_url=pr_url,
+                ),
+            )
+        except Exception as exc:
+            logger.warning("Review alert email failed: %s", exc)
 
     from app.utils.cache import cache_delete, cache_delete_pattern
     await cache_delete(f"codeintel:{repo.id}:stats")
     await cache_delete(f"codeintel:{repo.id}:leaderboard")
     await cache_delete_pattern(f"codeintel:{repo.id}:reviews:*")
+
+    # ── Step 7: Auto-trigger deep scan approval if score below threshold ──
+    scan_threshold = (repo.repo_config or {}).get("scan_threshold")
+    if scan_threshold is not None and ai_result.score_overall < scan_threshold:
+        await _maybe_trigger_scan_approval(
+            repo=repo,
+            pr_number=pr_number,
+            pr_title=pr_details["title"],
+            score=ai_result.score_overall,
+            threshold=scan_threshold,
+        )
 
     logger.info(
         "Review pipeline complete for %s#%d (overall=%.1f)",
@@ -319,3 +376,51 @@ async def run_pr_review(
         ai_result.score_overall,
     )
     return pr_review
+
+
+async def _maybe_trigger_scan_approval(
+    repo: "Repository",
+    pr_number: int,
+    pr_title: str,
+    score: float,
+    threshold: int,
+) -> None:
+    """
+    Store a one-time approval token in Redis and send a Slack notification
+    with approve/dismiss links for an auto-triggered deep scan.
+    """
+    import json
+    import secrets
+    from app.utils.cache import get_redis_connection
+
+    redis = get_redis_connection()
+    if redis is None:
+        logger.warning("Cannot send scan approval notification — Redis unavailable")
+        return
+
+    token = secrets.token_urlsafe(32)
+    key = f"codeintel:scan_approval:{token}"
+    payload = json.dumps({"repo_id": repo.id, "owner": repo.owner, "repo_name": repo.name})
+    await redis.set(key, payload, ex=86400)  # 24-hour TTL
+
+    approve_url = f"{settings.app_base_url}/api/scan-approval/{token}?action=approve"
+    dismiss_url = f"{settings.app_base_url}/api/scan-approval/{token}?action=dismiss"
+
+    slack_url = repo.slack_webhook_url or settings.slack_webhook_url
+    if not slack_url:
+        logger.info("Scan approval token created but no Slack URL configured for %s", repo.full_name)
+        return
+
+    message = (
+        f"🔍 *Deep Scan Requested* — `{repo.full_name}`\n"
+        f"PR #{pr_number}: _{pr_title}_ scored *{score:.1f}/100* (threshold: {threshold}).\n"
+        f"<{approve_url}|✅ Approve Deep Scan> · <{dismiss_url}|❌ Dismiss>"
+    )
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(slack_url, json={"text": message})
+        logger.info("Scan approval Slack notification sent for %s#%d", repo.full_name, pr_number)
+    except Exception as exc:
+        logger.warning("Failed to send scan approval notification: %s", exc)

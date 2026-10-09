@@ -25,7 +25,7 @@ VALID_RESPONSE = {
 
 async def test_valid_json_parsed_correctly():
     with patch(
-        "app.services.ai_service._call_anthropic_sync",
+        "app.services.ai_service._call_llm_sync",
         return_value=json.dumps(VALID_RESPONSE),
     ):
         result = await call_llm_with_retry("test prompt")
@@ -37,7 +37,7 @@ async def test_valid_json_parsed_correctly():
 async def test_score_clamped_above_100():
     over = {**VALID_RESPONSE, "score_overall": 150.0}
     with patch(
-        "app.services.ai_service._call_anthropic_sync",
+        "app.services.ai_service._call_llm_sync",
         return_value=json.dumps(over),
     ):
         result = await call_llm_with_retry("test prompt")
@@ -47,7 +47,7 @@ async def test_score_clamped_above_100():
 async def test_score_clamped_below_0():
     under = {**VALID_RESPONSE, "score_security": -10.0}
     with patch(
-        "app.services.ai_service._call_anthropic_sync",
+        "app.services.ai_service._call_llm_sync",
         return_value=json.dumps(under),
     ):
         result = await call_llm_with_retry("test prompt")
@@ -56,7 +56,7 @@ async def test_score_clamped_below_0():
 
 async def test_malformed_json_retries_and_raises():
     with patch(
-        "app.services.ai_service._call_anthropic_sync",
+        "app.services.ai_service._call_llm_sync",
         return_value="not valid json at all !!!",
     ) as mock_llm:
         with pytest.raises(RuntimeError, match="AI review failed after"):
@@ -68,7 +68,7 @@ async def test_markdown_fence_stripped():
     # Fenced response: ```json\n{...}\n``` — webhooks.py strips fence via split("```")[1]
     fenced = "```json\n" + json.dumps(VALID_RESPONSE) + "\n```"
     with patch(
-        "app.services.ai_service._call_anthropic_sync", return_value=fenced
+        "app.services.ai_service._call_llm_sync", return_value=fenced
     ):
         result = await call_llm_with_retry("test prompt")
     assert result.score_overall == 75.0

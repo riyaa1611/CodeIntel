@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     # GitHub App
     github_app_id: str = Field(default="", env="GITHUB_APP_ID")
     github_private_key_path: str = Field(default="", env="GITHUB_PRIVATE_KEY_PATH")
+    github_private_key: str = Field(default="", env="GITHUB_PRIVATE_KEY")
     github_webhook_secret: str = Field(default="", env="GITHUB_WEBHOOK_SECRET")
     github_client_id: str = Field(default="", env="GITHUB_CLIENT_ID")
     github_client_secret: str = Field(default="", env="GITHUB_CLIENT_SECRET")
@@ -22,13 +23,26 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str = Field(default="redis://localhost:6379/0", env="REDIS_URL")
 
-    # OpenRouter
+    # OpenRouter — primary + fallback keys
     openrouter_api_key: str = Field(default="", env="OPENROUTER_API_KEY")
+    openrouter_api_key_2: str = Field(default="", env="OPENROUTER_API_KEY_2")
+    openrouter_api_key_3: str = Field(default="", env="OPENROUTER_API_KEY_3")
     openrouter_model: str = Field(
-        default="deepseek/deepseek-r1", env="OPENROUTER_MODEL"
+        default="anthropic/claude-sonnet-4-5", env="OPENROUTER_MODEL"
     )
 
-    # Anthropic (Claude Sonnet 4.5 - replaces OpenRouter for LLM calls)
+    @property
+    def openrouter_api_keys(self) -> list[str]:
+        """All non-empty OpenRouter keys in priority order."""
+        return [
+            k for k in [
+                self.openrouter_api_key,
+                self.openrouter_api_key_2,
+                self.openrouter_api_key_3,
+            ] if k
+        ]
+
+    # Anthropic (kept for backwards compat, not used)
     anthropic_api_key: str = Field(default="", env="ANTHROPIC_API_KEY")
     anthropic_model: str = Field(default="claude-sonnet-4-5", env="ANTHROPIC_MODEL")
 
@@ -44,6 +58,7 @@ class Settings(BaseSettings):
 
     # App
     app_env: str = Field(default="development", env="APP_ENV")
+    app_base_url: str = Field(default="http://localhost:8000", env="APP_BASE_URL")
     log_level: str = Field(default="INFO", env="LOG_LEVEL")
 
     # CORS

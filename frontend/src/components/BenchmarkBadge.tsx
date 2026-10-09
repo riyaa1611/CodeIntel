@@ -41,7 +41,6 @@ export default function BenchmarkBadge({ repoId, score }: Props) {
     <div
       className={`inline-flex items-center gap-1.5 rounded-full px-4 py-1.5 text-sm font-medium ${color}`}
     >
-      <span>🏆</span>
       <span>
         Better than <strong>{percentile.toFixed(0)}%</strong> of PRs in this
         repository

@@ -173,8 +173,8 @@ async def _fetch_file_content(owner: str, repo: str, path: str) -> str | None:
 
 
 def _run_deep_scan_llm_sync(owner: str, repo: str, file_contents: dict[str, Any]) -> dict[str, Any]:
-    """Synchronous Anthropic call for deep scan (runs in executor)."""
-    from app.services.ai_service import _client as _anthropic_client
+    """Synchronous OpenRouter call for deep scan (runs in executor)."""
+    from app.services.ai_service import _call_llm_with_key_fallback
 
     sections = []
     for path, content in file_contents.items():
@@ -189,12 +189,7 @@ def _run_deep_scan_llm_sync(owner: str, repo: str, file_contents: dict[str, Any]
 
     for attempt in range(1, 4):
         try:
-            response = _anthropic_client.messages.create(
-                model=settings.anthropic_model,
-                max_tokens=4096,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            raw = response.content[0].text.strip()
+            raw = _call_llm_with_key_fallback([{"role": "user", "content": prompt}])
             if raw.startswith("```"):
                 raw = raw.split("```")[1]
                 if raw.startswith("json"):
@@ -234,6 +229,16 @@ def make_celery():
         task_soft_time_limit=100,
         worker_prefetch_multiplier=1,
         task_acks_late=True,
+        beat_schedule={
+            "check-scheduled-deep-scans": {
+                "task": "tasks.check_scheduled_deep_scans",
+                "schedule": 900,  # every 15 minutes
+            },
+            "send-monthly-digests": {
+                "task": "tasks.send_monthly_digests",
+                "schedule": 86400,  # every 24 hours — task itself checks if it's the 1st
+            },
+        },
     )
     return app
 
@@ -295,6 +300,7 @@ def process_pr_review(
             result = loop.run_until_complete(_run())
         finally:
             loop.close()
+            asyncio.set_event_loop(None)
 
         logger.info(
             "Task process_pr_review completed: %s#%d → score=%.1f",
@@ -302,6 +308,40 @@ def process_pr_review(
             pr_number,
             result["score_overall"],
         )
+
+        # Publish real-time event to WebSocket clients
+        try:
+            from app.utils.ws_manager import publish_event_sync
+            from app.database import AsyncSessionLocal
+            from sqlalchemy import select
+            from app.models import Repository
+
+            async def _get_repo_id() -> int | None:
+                async with AsyncSessionLocal() as s:
+                    r = await s.execute(
+                        select(Repository.id).where(Repository.full_name == repo_full_name)
+                    )
+                    return r.scalar_one_or_none()
+
+            _loop = asyncio.new_event_loop()
+            try:
+                repo_id = _loop.run_until_complete(_get_repo_id()) or 0
+            finally:
+                _loop.close()
+
+            publish_event_sync(
+                "review.completed",
+                repo_id,
+                {
+                    "review_id": result["review_id"],
+                    "repo_full_name": repo_full_name,
+                    "pr_number": pr_number,
+                    "score_overall": result["score_overall"],
+                },
+            )
+        except Exception as _exc:
+            logger.warning("Failed to publish review.completed event: %s", _exc)
+
         return result
 
     except Exception as exc:
@@ -381,6 +421,17 @@ def deep_scan_repository(self: Task, owner: str, repo: str, repo_id: int) -> dic
         if not file_contents:
             raise RuntimeError(f"No readable source files found in {owner}/{repo}")
 
+        # Publish progress event: files fetched, starting LLM analysis
+        try:
+            from app.utils.ws_manager import publish_event_sync
+            publish_event_sync(
+                "scan.progress",
+                repo_id,
+                {"stage": "analyzing", "files_fetched": len(file_contents), "owner": owner, "repo": repo},
+            )
+        except Exception as _exc:
+            logger.warning("Failed to publish scan.progress event: %s", _exc)
+
         # ── 6. Call LLM ────────────────────────────────────────────────────────
         llm_result = await _run_deep_scan_llm(owner, repo, file_contents)
 
@@ -426,6 +477,24 @@ def deep_scan_repository(self: Task, owner: str, repo: str, repo_id: int) -> dic
             len(file_contents),
             scan_id,
         )
+
+        # Publish scan.completed event
+        try:
+            from app.utils.ws_manager import publish_event_sync
+            publish_event_sync(
+                "scan.completed",
+                repo_id,
+                {
+                    "scan_id": scan_id,
+                    "owner": owner,
+                    "repo": repo,
+                    "overall_score": scan.overall_score,
+                    "files_analyzed": len(file_contents),
+                },
+            )
+        except Exception as _exc:
+            logger.warning("Failed to publish scan.completed event: %s", _exc)
+
         return {
             "scan_id": scan_id,
             "owner": owner,
@@ -441,6 +510,7 @@ def deep_scan_repository(self: Task, owner: str, repo: str, repo_id: int) -> dic
             result = loop.run_until_complete(_run())
         finally:
             loop.close()
+            asyncio.set_event_loop(None)
         return result
 
     except Exception as exc:
@@ -452,6 +522,180 @@ def deep_scan_repository(self: Task, owner: str, repo: str, repo_id: int) -> dic
         except self.MaxRetriesExceededError:
             logger.error("Max retries exceeded for deep scan %s/%s — giving up", owner, repo)
             return {"error": str(exc), "owner": owner, "repo": repo}
+
+
+@celery_app.task(
+    name="tasks.send_monthly_digests",
+    time_limit=120,
+    soft_time_limit=100,
+)
+def send_monthly_digests() -> dict:
+    """
+    Celery Beat task — runs daily but only sends emails on the 1st of each month.
+    Queries all repos, computes last-30-day stats, sends digest to opted-in users.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    now = datetime.now(tz=timezone.utc)
+    if now.day != 1:
+        return {"skipped": True, "reason": f"Not the 1st (today is {now.day})"}
+
+    month_label = now.strftime("%B %Y")
+
+    async def _run() -> dict:
+        from sqlalchemy import func, select
+        from app.database import AsyncSessionLocal
+        from app.models import PRReview, Repository, User
+        from app.services.email_service import send_monthly_digest
+
+        cutoff = now - timedelta(days=30)
+
+        async with AsyncSessionLocal() as session:
+            # All opted-in user emails
+            user_result = await session.execute(
+                select(User.email).where(
+                    User.email.is_not(None),
+                    User.email_preferences["monthly_digest"].astext == "true",
+                )
+            )
+            digest_emails = [r for (r,) in user_result.all() if r]
+            if not digest_emails:
+                return {"sent": 0, "reason": "No opted-in users"}
+
+            # Per-repo stats
+            repos_result = await session.execute(select(Repository))
+            repos = repos_result.scalars().all()
+
+            sent = 0
+            for repo in repos:
+                stats_result = await session.execute(
+                    select(
+                        func.count().label("total"),
+                        func.avg(PRReview.score_overall).label("avg_overall"),
+                        func.avg(PRReview.score_security).label("avg_security"),
+                        func.avg(PRReview.score_quality).label("avg_quality"),
+                        func.avg(PRReview.score_requirement).label("avg_req"),
+                        func.avg(PRReview.score_performance).label("avg_perf"),
+                    ).where(
+                        PRReview.repo_id == repo.id,
+                        PRReview.created_at >= cutoff,
+                    )
+                )
+                stats = stats_result.one()
+                if not stats.total:
+                    continue
+
+                authors_result = await session.execute(
+                    select(
+                        PRReview.pr_author.label("author"),
+                        func.count().label("pr_count"),
+                        func.avg(PRReview.score_overall).label("avg_overall"),
+                    )
+                    .where(PRReview.repo_id == repo.id, PRReview.created_at >= cutoff)
+                    .group_by(PRReview.pr_author)
+                    .order_by(func.avg(PRReview.score_overall).desc())
+                    .limit(10)
+                )
+                top_authors = [
+                    {"author": r.author, "pr_count": r.pr_count, "avg_overall": float(r.avg_overall or 0)}
+                    for r in authors_result.all()
+                ]
+
+                import asyncio as _aio
+                await _aio.get_running_loop().run_in_executor(
+                    None,
+                    lambda r=repo, s=stats, a=top_authors: send_monthly_digest(
+                        to=digest_emails,
+                        repo_full_name=r.full_name,
+                        total_reviews=s.total,
+                        avg_overall=float(s.avg_overall or 0),
+                        avg_security=float(s.avg_security or 0),
+                        avg_quality=float(s.avg_quality or 0),
+                        avg_requirement=float(s.avg_req or 0),
+                        avg_performance=float(s.avg_perf or 0),
+                        top_authors=a,
+                        month_label=month_label,
+                    ),
+                )
+                sent += 1
+
+        return {"sent": sent, "recipients": len(digest_emails), "month": month_label}
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            result = loop.run_until_complete(_run())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+        logger.info("send_monthly_digests: %s", result)
+        return result
+    except Exception as exc:
+        logger.error("send_monthly_digests failed: %s", exc, exc_info=True)
+        return {"error": str(exc)}
+
+
+@celery_app.task(
+    name="tasks.check_scheduled_deep_scans",
+    time_limit=60,
+    soft_time_limit=50,
+)
+def check_scheduled_deep_scans() -> dict:
+    """
+    Celery Beat task — runs every 15 minutes.
+    Finds enabled scan schedules whose next_run_at has passed and dispatches
+    deep_scan_repository for each overdue repo.
+    """
+    from datetime import datetime, timezone
+
+    async def _run() -> list[dict]:
+        from sqlalchemy import select
+        from app.database import AsyncSessionLocal
+        from app.models import Repository, ScanSchedule
+
+        now = datetime.now(tz=timezone.utc)
+
+        dispatched = []
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(
+                select(ScanSchedule, Repository)
+                .join(Repository, ScanSchedule.repo_id == Repository.id)
+                .where(ScanSchedule.enabled.is_(True), ScanSchedule.next_run_at <= now)
+            )
+            rows = result.all()
+
+            for sched, repo in rows:
+                deep_scan_repository.delay(repo.owner, repo.name, repo.id)
+                logger.info(
+                    "Scheduled deep scan dispatched: %s/%s (freq=%s)",
+                    repo.owner, repo.name, sched.frequency,
+                )
+
+                from datetime import timedelta
+                delta_map = {"daily": timedelta(days=1), "weekly": timedelta(days=7), "monthly": timedelta(days=30)}
+                delta = delta_map.get(sched.frequency, timedelta(days=7))
+                sched.last_run_at = now
+                sched.next_run_at = now + delta
+                dispatched.append({"repo": repo.full_name, "freq": sched.frequency})
+
+            await session.commit()
+
+        return dispatched
+
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            dispatched = loop.run_until_complete(_run())
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+        logger.info("check_scheduled_deep_scans: dispatched %d scan(s)", len(dispatched))
+        return {"dispatched": dispatched}
+    except Exception as exc:
+        logger.error("check_scheduled_deep_scans failed: %s", exc, exc_info=True)
+        return {"error": str(exc)}
 
 
 import traceback as _tb_module
@@ -496,6 +740,7 @@ def on_task_failure(sender=None, task_id=None, exception=None,
             loop.run_until_complete(_write())
         finally:
             loop.close()
+            asyncio.set_event_loop(None)
         logger.info("TaskFailure recorded for task: %s", task_name)
     except Exception as exc:
         logger.error("Failed to record TaskFailure: %s", exc)
