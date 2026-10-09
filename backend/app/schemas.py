@@ -135,11 +135,11 @@ class BenchmarkResult(BaseModel):
 # ── AI Review Output Schema ──────────────────────────────────────────────────
 
 class AIReviewOutput(BaseModel):
-    score_overall: float = Field(ge=0, le=100)
-    score_requirement: float = Field(ge=0, le=100)
-    score_security: float = Field(ge=0, le=100)
-    score_quality: float = Field(ge=0, le=100)
-    score_performance: float = Field(ge=0, le=100)
+    score_overall: float
+    score_requirement: float
+    score_security: float
+    score_quality: float
+    score_performance: float
     feedback_requirement: str
     feedback_security: str
     feedback_quality: str
