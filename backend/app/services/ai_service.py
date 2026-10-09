@@ -2,7 +2,7 @@ import json
 import logging
 from typing import Any
 
-import anthropic
+from openai import OpenAI
 
 from app.config import settings
 from app.schemas import AIReviewOutput
@@ -10,7 +10,42 @@ from app.schemas import AIReviewOutput
 logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 
-_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+OPENROUTER_BASE = "https://openrouter.ai/api/v1"
+
+# Keep _client for backwards compat (tasks.py imports it)
+_client = OpenAI(
+    api_key=settings.openrouter_api_key,
+    base_url=OPENROUTER_BASE,
+)
+
+
+def _call_llm_with_key_fallback(messages: list[dict], max_tokens: int = 4096) -> str:
+    """Try each OpenRouter key in order, rotating on credit/auth errors."""
+    keys = settings.openrouter_api_keys
+    if not keys:
+        raise RuntimeError("No OpenRouter API keys configured")
+
+    last_err: Exception | None = None
+    for i, key in enumerate(keys):
+        client = OpenAI(api_key=key, base_url=OPENROUTER_BASE)
+        try:
+            response = client.chat.completions.create(
+                model=settings.openrouter_model,
+                max_tokens=max_tokens,
+                messages=messages,
+            )
+            if i > 0:
+                logger.info("Key fallback succeeded on key #%d", i + 1)
+            return response.choices[0].message.content.strip()
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            if status in (401, 402, 429):
+                logger.warning("Key #%d exhausted/unauthorized (status=%s), trying next", i + 1, status)
+                last_err = exc
+                continue
+            raise
+
+    raise RuntimeError(f"All {len(keys)} OpenRouter keys failed. Last error: {last_err}")
 
 
 def _build_prompt(
@@ -77,18 +112,13 @@ Return ONLY this JSON:
 }}"""
 
 
-def _call_anthropic_sync(prompt: str) -> str:
-    """Synchronous Anthropic call — safe to run in executor."""
-    response = _client.messages.create(
-        model=settings.anthropic_model,
-        max_tokens=4096,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return response.content[0].text.strip()
+def _call_llm_sync(prompt: str) -> str:
+    """Synchronous OpenRouter call with key fallback — safe to run in executor."""
+    return _call_llm_with_key_fallback([{"role": "user", "content": prompt}])
 
 
 async def call_llm_with_retry(prompt: str) -> AIReviewOutput:
-    """Call Anthropic API with retry logic on malformed JSON."""
+    """Call OpenRouter API with retry logic on malformed JSON."""
     import asyncio
 
     last_error: Exception | None = None
@@ -96,11 +126,11 @@ async def call_llm_with_retry(prompt: str) -> AIReviewOutput:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             logger.info(
-                "Calling Anthropic (model=%s, attempt=%d/%d)",
-                settings.anthropic_model, attempt, MAX_RETRIES,
+                "Calling OpenRouter (model=%s, attempt=%d/%d)",
+                settings.openrouter_model, attempt, MAX_RETRIES,
             )
             loop = asyncio.get_running_loop()
-            raw = await loop.run_in_executor(None, _call_anthropic_sync, prompt)
+            raw = await loop.run_in_executor(None, _call_llm_sync, prompt)
 
             if raw.startswith("```"):
                 raw = raw.split("```")[1]

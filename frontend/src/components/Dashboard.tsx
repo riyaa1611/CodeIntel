@@ -31,7 +31,7 @@ function StatCard({
   return (
     <div className="card">
       <p className="text-sm font-medium text-gray-500">{label}</p>
-      <p className={`mt-1 text-3xl font-bold ${color ?? 'text-gray-900'}`}>
+      <p className={`mt-1 text-3xl font-bold ${color ?? 'text-gray-900 dark:text-gray-100'}`}>
         {value}
       </p>
       {sub && <p className="mt-0.5 text-xs text-gray-400">{sub}</p>}
@@ -70,6 +70,15 @@ export default function Dashboard({ repoId }: Props) {
   }
 
   if (!stats) return null
+
+  if (stats.total_reviews === 0) {
+    return (
+      <div className="flex flex-col items-center justify-center py-20 text-center">
+        <h3 className="text-lg font-semibold text-gray-700 dark:text-gray-300">No PRs reviewed yet</h3>
+        <p className="text-sm text-gray-500 mt-1">Open a pull request on this repo and CodeIntel will automatically review it.</p>
+      </div>
+    )
+  }
 
   const { dimension_averages: da, score_distribution: sd } = stats
   const criticalCount = sd.low
